@@ -19,7 +19,7 @@ src/
 ├── api/
 │   └── client.ts            # Axios HTTP client (all backend calls)
 ├── components/
-│   ├── ResumeUpload.tsx     # Step 1 — PDF upload + parse
+│   ├── ResumeUpload.tsx     # Step 1 — PDF / LaTeX (.tex) upload + parse
 │   ├── JDInput.tsx          # Step 2 — Job description input / scrape
 │   ├── ResumePreview.tsx    # Step 4 — PDF preview (iframe) + download + ATS scores
 │   └── StepIndicator.tsx    # Progress bar (steps 1–4)
@@ -37,7 +37,7 @@ The 4-step resume tailoring wizard:
 
 | Step | Component | Backend Call | Description |
 |------|-----------|-------------|-------------|
-| 1 | `ResumeUpload` | `POST /api/parse-resume` | Upload PDF, receive parsed text + base64 |
+| 1 | `ResumeUpload` | `POST /api/parse-resume` | Upload PDF or LaTeX (.tex), receive parsed text + base64 |
 | 2 | `JDInput` | `POST /api/scrape-jd` | Paste or scrape a job description |
 | 3 | (auto) | `POST /api/generate-resume` | AI-tailor resume → structured data + rewritten PDF |
 | 4 | `ResumePreview` | — | Preview PDF, ATS score before/after, download |

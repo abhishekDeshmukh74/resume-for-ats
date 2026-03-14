@@ -2,14 +2,14 @@
 
 ## Overview
 
-The AI logic uses **LangGraph** to orchestrate 6 sequential agents. Each agent is a standalone node that reads from and writes to a shared `AgentState` TypedDict.
+The AI logic uses **LangGraph** to orchestrate **7 sequential agents**. Each agent is a standalone node that reads from and writes to a shared `AgentState` TypedDict.
 
-All agents use `ChatGroq` (LLaMA 3.3 70B, temperature 0.2) via `llm.py`.
+All agents use a multi-provider LLM (Groq or Google Gemini, configured via `LLM_PROVIDER` env var) with temperature 0.2 via `llm.py`.
 
 ## Pipeline Flow
 
 ```
-extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate → score_extract → END
+extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate → score_extract → compile_pdf → END
 ```
 
 ## Agent Details
@@ -70,6 +70,17 @@ Validates and fixes:
 - Scores keyword coverage (0–100)
 - Extracts structured fields needed by `ResumeData`
 
+### Agent 7 — PDF Compiler (`pdf_compiler.py`)
+
+**Input**: `replacements`, `resume_file_b64`, `resume_file_type`
+**Output**: `compiled_pdf_b64`
+
+Applies the validated replacements to the original file and produces the final PDF:
+- **PDF uploads** → `rewriter.py` (PyMuPDF in-place text replacement)
+- **LaTeX uploads** → `latex_rewriter.py` (source patching + xelatex/pdflatex compilation)
+
+If no original file is available, returns an empty string (the pipeline can still return structured `ResumeData` without a compiled file).
+
 ## Pipeline Run Tracking
 
 Every pipeline execution is tracked in MongoDB via `db.py` (best-effort):
@@ -94,31 +105,38 @@ Key state fields:
 
 | Category | Fields |
 |----------|--------|
-| Inputs | `resume_text`, `jd_text` |
+| Inputs | `resume_text`, `jd_text`, `resume_file_b64`, `resume_file_type` |
 | Agent 1 | `jd_keywords` (list, merge), `keyword_categories` (dict, overwrite) |
 | Agent 2 | `resume_sections` (dict, overwrite), `gap_analysis` (str, overwrite) |
 | Agent 3 | `ats_score_before` (int, overwrite) |
 | Agent 4 | `raw_replacements` (list, merge) |
 | Agent 5 | `replacements` (list[TextReplacement], merge) |
 | Agent 6 | `ats_score` (int), `matched_keywords` (list), structured fields |
+| Agent 7 | `compiled_pdf_b64` (str, overwrite) |
 
 ## LLM Configuration (`llm.py`)
 
-| Parameter | Value |
-|-----------|-------|
-| Model | `llama-3.3-70b-versatile` |
-| Temperature | `0.2` |
-| Max tokens | `8192` |
-| Provider | Groq (via `langchain-groq`) |
+The LLM provider is selected by the `LLM_PROVIDER` env var (`"groq"` or `"gemini"`).
 
-`parse_llm_json()` safely extracts JSON from LLM responses, handling markdown code fences.
+| Parameter | Groq | Gemini |
+|-----------|------|--------|
+| Model | `llama-3.3-70b-versatile` (configurable via `GROQ_MODEL`) | `gemini-2.0-flash` (configurable via `GEMINI_MODEL`) |
+| Temperature | `0.2` | `0.2` |
+| Max tokens | `8192` | `8192` |
+| Provider | `langchain-groq` (`ChatGroq`) | `langchain-google-genai` (`ChatGoogleGenerativeAI`) |
+
+`parse_llm_json()` safely extracts JSON from LLM responses, handling markdown code fences. Includes a multi-pass JSON repair pipeline for truncated or malformed output (trailing comma removal → bracket closure → regex object extraction).
 
 ## Public API (`graph.py`)
 
 ```python
 from backend.services.agents import generate_resume
 
-resume_data: ResumeData = generate_resume(resume_text, jd_text)
+resume_data, compiled_pdf_b64 = generate_resume(
+    resume_text, jd_text,
+    resume_file_b64="<base64-encoded original file>",
+    resume_file_type="pdf",  # or "tex"
+)
 ```
 
-Drop-in replacement for the previous monolithic `groq_service.generate_resume()`.
+Returns `(ResumeData, compiled_pdf_b64)`. Drop-in replacement for the previous monolithic `groq_service.generate_resume()`.

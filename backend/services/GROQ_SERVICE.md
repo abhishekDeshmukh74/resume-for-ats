@@ -18,7 +18,7 @@ The single-prompt approach had several limitations:
 3. **No baseline scoring** — no way to show a before/after ATS score comparison.
 4. **Monolithic prompt** — a single large prompt made it hard to debug which part of the pipeline failed.
 
-The multi-agent pipeline addresses all of these by splitting the work into 6 focused agents with dedicated QA validation and dual scoring steps.
+The multi-agent pipeline addresses all of these by splitting the work into 7 focused agents with dedicated QA validation, dual scoring, and a PDF compilation step.
 
 ## How It Worked
 

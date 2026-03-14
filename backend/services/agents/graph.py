@@ -1,7 +1,7 @@
-"""LangGraph pipeline — wires all agents into a sequential graph.
+"""LangGraph pipeline — wires all 7 agents into a sequential graph.
 
 Flow:
-  extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate → score_extract
+  extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate → score_extract → compile_pdf
 
 Each node reads from / writes to the shared AgentState.
 Agent I/O is persisted to MongoDB for the /info UI.

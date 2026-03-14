@@ -1,6 +1,6 @@
 # Backend — pass-ats API
 
-FastAPI backend that parses PDF resumes, scrapes job descriptions, runs a **LangGraph multi-agent pipeline** (6 sequential AI agents) to tailor resume content for ATS, and rewrites the original PDF in-place with updated text.
+FastAPI backend that parses PDF and LaTeX resumes, scrapes job descriptions, runs a **LangGraph multi-agent pipeline** (7 sequential AI agents) to tailor resume content for ATS, and produces a final PDF with updated text.
 
 ## Architecture
 
@@ -9,41 +9,50 @@ backend/
 ├── main.py              # FastAPI app, CORS, router registration, logging
 ├── models.py            # Pydantic request/response schemas
 ├── routers/
-│   ├── resume.py        # POST /api/parse-resume
+│   ├── resume.py        # POST /api/parse-resume (PDF + LaTeX)
 │   ├── jd.py            # POST /api/scrape-jd
 │   ├── generate.py      # POST /api/generate-resume
 │   └── pipeline.py      # GET  /api/pipeline-runs (list + detail)
 └── services/
     ├── parser.py         # PDF text + HTML extraction (PyMuPDF)
+    ├── latex_parser.py   # LaTeX (.tex) text extraction
     ├── scraper.py        # URL → plain text (httpx + BeautifulSoup)
     ├── rewriter.py       # In-place PDF text replacement (PyMuPDF)
+    ├── latex_rewriter.py # LaTeX source patching + compilation
     ├── db.py             # MongoDB persistence for pipeline run tracking
     └── agents/           # LangGraph multi-agent pipeline
         ├── graph.py              # StateGraph wiring + pipeline tracking
         ├── state.py              # Shared AgentState TypedDict
-        ├── llm.py                # ChatGroq instance + JSON parser
+        ├── llm.py                # Multi-provider LLM (Groq/Gemini) + JSON parser
         ├── keyword_extractor.py  # Agent 1: JD keyword extraction
         ├── resume_analyser.py    # Agent 2: Section analysis + gap identification
         ├── scorer.py             # Agents 3 & 6: ATS scoring + structured extraction
         ├── rewriter_agent.py     # Agent 4: old→new replacement generation
-        └── qa_agent.py           # Agent 5: Validation + deduplication
+        ├── qa_agent.py           # Agent 5: Validation + deduplication
+        └── pdf_compiler.py       # Agent 7: Apply replacements + compile PDF
 ```
 
 ## Environment Variables
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GROQ_API_KEY` | Yes | API key from [console.groq.com](https://console.groq.com/) |
+| `GROQ_API_KEY` | Yes* | API key from [console.groq.com](https://console.groq.com/) |
+| `GEMINI_API_KEY` | Yes* | API key from [aistudio.google.com](https://aistudio.google.com/) |
+| `LLM_PROVIDER` | No | `"groq"` (default) or `"gemini"` |
+| `GROQ_MODEL` | No | Groq model name (default: `llama-3.3-70b-versatile`) |
+| `GEMINI_MODEL` | No | Gemini model name (default: `gemini-2.0-flash`) |
 | `ALLOWED_ORIGINS` | Yes | Comma-separated CORS origins (e.g. `http://localhost:5173`) |
 | `MONGODB_URL` | No | MongoDB connection string for pipeline run tracking |
+
+\* At least one of `GROQ_API_KEY` or `GEMINI_API_KEY` is required, depending on `LLM_PROVIDER`.
 
 ## API Endpoints
 
 ### `POST /api/parse-resume`
 
-Upload a PDF file. Returns extracted text, styled HTML preview, and the original file as base64.
+Upload a PDF or LaTeX (.tex) file. Returns extracted text, styled HTML preview, and the original file as base64.
 
-**Request**: `multipart/form-data` with field `file` (PDF, max 10 MB)
+**Request**: `multipart/form-data` with field `file` (PDF or `.tex`, max 10 MB)
 
 **Response** (`ParsedResumeResponse`):
 ```json
@@ -56,6 +65,9 @@ Upload a PDF file. Returns extracted text, styled HTML preview, and the original
 ```
 
 **Errors**: `415` unsupported type · `413` file too large · `422` parse failure or empty text
+
+> For PDF uploads, text is extracted via PyMuPDF and HTML is generated from span dicts.
+> For LaTeX uploads, text is produced by stripping LaTeX commands; the raw source is preserved for rewriting.
 
 ---
 
@@ -79,15 +91,15 @@ Fetch a URL and extract the main text content (job description).
 
 ### `POST /api/generate-resume`
 
-Core endpoint. Takes the resume text, job description, and original PDF (base64). Runs the LangGraph multi-agent pipeline to tailor the resume, then rewrites the original PDF in-place.
+Core endpoint. Takes the resume text, job description, and original file (base64). Runs the 7-agent LangGraph pipeline to tailor the resume, then produces a rewritten PDF.
 
 **Request** (`GenerateRequest`):
 ```json
 {
   "resume_text": "plain text of the resume",
   "jd_text": "job description text",
-  "resume_file_b64": "base64-encoded original PDF",
-  "resume_file_type": "pdf"
+  "resume_file_b64": "base64-encoded original PDF or .tex",
+  "resume_file_type": "pdf or tex"
 }
 ```
 
@@ -140,28 +152,26 @@ Health check. Returns `{ "status": "ok" }`.
 ## Data Flow
 
 ```
-Upload PDF ──► parse_pdf() ──► text + file_b64
+Upload PDF/TeX ─► parse_pdf() / parse_tex() ─► text + file_b64
                                     │
-Enter JD ───────────────────────────┤
+Enter JD ───────────────────────┤
                                     ▼
                             agents.generate_resume()
-                            (LangGraph 6-agent pipeline)
+                            (LangGraph 7-agent pipeline)
                                     │
                                     ▼
-                            ResumeData (tailored JSON + replacements)
-                                    │
-                                    ▼
-                            rewriter.rewrite_pdf()
-                                    │
-                                    ▼
-                            rewritten PDF (base64) + ResumeData
+                            ResumeData + compiled PDF (base64)
 ```
 
 ## Services
 
 ### `parser.py`
 
-Uses **PyMuPDF** (`fitz`) to extract plain text (`page.get_text("text")`) and styled HTML (`page.get_text("html")`) from each page. Returns base64-encoded original bytes for later rewriting. See [PARSER.md](services/PARSER.md).
+Uses **PyMuPDF** (`fitz`) to extract plain text and styled HTML from each page. Text is normalised to fix common PDF extraction spacing artefacts (collapsed whitespace, camelCase word boundaries, missing post-punctuation spaces). HTML is generated from span dicts for reliable font/colour extraction. Returns base64-encoded original bytes for later rewriting. See [PARSER.md](services/PARSER.md).
+
+### `latex_parser.py`
+
+Strips LaTeX markup to produce plain text for the AI pipeline. Handles `\textbf`, `\href`, `\section`, `\item`, and other common commands. Preserves the raw `.tex` source as base64 for later rewriting by `latex_rewriter.py`.
 
 ### `scraper.py`
 
@@ -169,7 +179,11 @@ Uses **httpx** to fetch URLs and **BeautifulSoup** to extract text. Strips noise
 
 ### `rewriter.py`
 
-Rewrites the original PDF in-place using AI-generated `{old, new}` replacement pairs. Extracts embedded fonts from the PDF and reuses them for replacement text. Uses block-scoped, line-aware matching with Unicode normalisation, and inserts text at original baselines via `TextWriter`. See [REWRITER.md](services/REWRITER.md).
+Rewrites the original PDF in-place using AI-generated `{old, new}` replacement pairs. Uses `page.search_for()` to locate text, captures font/size/colour from the matched region, redacts the old text, and re-inserts new text via `TextWriter` with matched styling. Embedded fonts are extracted per-page and reused when available; falls back to Base-14 fonts. See [REWRITER.md](services/REWRITER.md).
+
+### `latex_rewriter.py`
+
+Applies AI replacements to `.tex` source code and compiles to PDF via xelatex (falls back to pdflatex/lualatex). Includes flexible pattern matching that tolerates `.tex` line-wrapping and LaTeX escape sequences (`\%`, `\&`). Auto-detects MiKTeX/TeX Live installations.
 
 ### `db.py`
 
@@ -177,7 +191,7 @@ MongoDB persistence for pipeline run tracking. All operations are **best-effort*
 
 ### `agents/`
 
-LangGraph multi-agent pipeline with 6 sequential agents: keyword extraction → resume analysis → pre-rewrite scoring → rewriting → QA/dedup → final scoring. See [agents/AGENTS.md](services/agents/AGENTS.md).
+LangGraph multi-agent pipeline with 7 sequential agents: keyword extraction → resume analysis → pre-rewrite scoring → rewriting → QA/dedup → final scoring → PDF compilation. See [agents/AGENTS.md](services/agents/AGENTS.md).
 
 ### `groq_service.py` (superseded)
 
@@ -198,7 +212,7 @@ See [requirements.txt](requirements.txt). Key packages:
 
 - **FastAPI** + **uvicorn** — web framework + ASGI server
 - **PyMuPDF** (`fitz`) — PDF parsing and in-place text rewriting
-- **LangGraph** + **langchain-groq** — multi-agent AI pipeline
+- **LangGraph** + **langchain-groq** + **langchain-google-genai** — multi-agent AI pipeline (Groq & Gemini)
 - **httpx** + **beautifulsoup4** — HTTP client + HTML scraping
 - **pymongo** — MongoDB driver for pipeline run tracking
 - **pydantic** — data validation

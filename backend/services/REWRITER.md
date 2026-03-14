@@ -10,97 +10,53 @@ The output PDF preserves the original layout, fonts, colours, and formatting —
 ### Pipeline
 
 1. **Receive** `file_bytes` (original PDF) + `ResumeData` (AI output with `.replacements` list).
-2. **Extract embedded fonts** from the document into a cache (`_build_font_cache`) so we can re-insert text using the *exact same* typeface (e.g., `LMRoman10-Regular` from LaTeX PDFs).
-3. **For each page**, collect spans grouped by **block → line** (not a flat list — prevents cross-block matching).
-4. **For each replacement**:
-   - Search each block's *lines* for a normalised match of the `old` text (sliding-window over contiguous lines).
-   - Only match within a single block — never across blocks/sections.
-5. **Redact** matched areas with **one redact rect per group** (union of all matched line bboxes), using `graphics=0` to preserve line-art (horizontal separator lines).
-6. **Word-wrap** the `new` text to fit the same line widths as the original lines (`_wrap_text_to_lines`).
-7. **Insert** each wrapped line via `TextWriter` at the original line's `(x0, baseline)` position, using the embedded font and per-line auto-shrink.
-8. If zero replacements matched, return the original PDF unchanged (no corruption risk).
+2. **For each page**, build a font map by extracting embedded fonts from that page's font table.
+3. **For each replacement**:
+   - Use `page.search_for(old_text)` to locate all bounding-box rects for the old text (handles multi-line wrapping automatically).
+   - If not found, retry with a sanitised variant (NFKC normalisation + character mapping).
+   - Capture the font, font size, and colour from the text span at the first matched rect.
+4. **Redact** all matched rects via `page.add_redact_annot()`.
+5. **Apply** all redactions in a single `page.apply_redactions()` call.
+6. **Re-insert** the new text at the position of the first (topmost) matched rect via `TextWriter`, using the captured font, size, and colour.
+7. If zero replacements matched, return the original PDF unchanged (no corruption risk).
 
-### Font Reuse (Embedded Fonts)
+### Font Resolution
 
-**Critical for format preservation**: Instead of falling back to Base-14 fonts (Times-Roman, Helvetica), the rewriter extracts the actual fonts embedded in the PDF using `doc.extract_font(xref)` and creates `fitz.Font` objects from the font buffers. This means:
+For each replacement, the rewriter attempts to use the exact font from the matched text span:
 
-- A LaTeX PDF with `LMRoman10-Regular` will have replacement text in `LMRoman10-Regular`
-- A Word PDF with `Calibri` will have replacement text in `Calibri`
-- Only when extraction fails **or the font is a subset missing glyphs for the replacement text** does it fall back to Base-14 (`tiro`, `helv`, etc.)
+1. **Embedded font** — Extract the font data from the PDF by xref and create a `fitz.Font` from the buffer. This handles subset-prefixed names (e.g. `WRAHST+LMRoman10-Regular` → `LMRoman10-Regular`).
+2. **Base-14 font** — If the span's font name matches a known Base-14 name (Helvetica, Times-Roman, Courier, etc.), use the corresponding PyMuPDF built-in.
+3. **Flag-based fallback** — Based on the span's bold/italic flags, fall back to the appropriate Times variant (`tiro`, `tibo`, `tiit`, `tibi`).
 
-The font cache is keyed by: full basefont name (e.g., `WRAHST+LMRoman10-Regular`), clean name without subset prefix (`LMRoman10-Regular`), and short PDF name (`F43`).
+### Text Sanitisation
 
-**Glyph validation** (`_font_can_render`): Before using an extracted font, every non-space character in the replacement text is checked via `font.has_glyph(ord(ch))`. If any glyph is missing (common with subset fonts), the font is rejected and the style-matched Base-14 fallback is used instead — preventing garbled characters.
+Before insertion, replacement text is normalised via `_sanitize_text()`:
+- Unicode NFKC normalisation
+- Smart quotes → straight quotes
+- Em/en dashes → hyphens
+- Ellipsis → `...`
+- Non-breaking spaces → regular spaces
+- Zero-width characters and BOM removed
 
-### Block-Scoped, Line-Aware Matching
-
-Spans are grouped by PDF block, then by line within the block. Matching uses a sliding window over *lines* (not flat spans), which handles multi-line text blocks (like bullet points that wrap across 2-3 lines) correctly.
-
-```
-Block 0 (summary): [Line0[spans], Line1[spans], ...]  ← match within lines of this block
-Block 1 (bullet):  [Line0[spans], Line1[spans], ...]  ← match within lines of this block
-```
-
-### Text Normalisation (`_norm`) and Sanitisation (`_sanitize_text`)
-
-Both the `old` text from AI and the span text from the PDF are normalised before comparison:
-
-- Unicode NFKC normalisation (collapses ligatures like fi → fi)
-- Common PDF character replacements (smart quotes → straight, em/en dash → hyphen, bullet chars → `*`, non-breaking space → space)
-- Whitespace collapse (`\s+` → single space)
-- **Spaces before punctuation** are removed (`typescript) ,` → `typescript),`) — crucial for LaTeX PDFs with inter-character spacing
-- Case-insensitive comparison
-
-**Output sanitisation** (`_sanitize_text`): Before insertion, the AI's replacement text is normalised to plain ASCII equivalents (smart quotes → straight, em/en dashes → hyphens, zero-width chars removed). This prevents rendering failures when the target font lacks glyphs for fancy Unicode characters.
-
-### Line Info & Font Selection (`_line_info`)
-
-For each matched line, `_line_info` returns `(x0, baseline, width, height, font_name, font_size)`:
-
-- **Baseline** uses the span `origin` field (true text baseline), not `bbox.y1` (descender bottom)
-- **Font selection**: when a line has **mixed Bold and non-Bold** spans (common in LaTeX PDFs where keywords are bolded), the Regular variant is preferred. This is because:
-  - We can't know which words in the *new* text should be bold
-  - Bold glyphs are wider, causing unnecessary auto-shrink
-  - Purely-bold lines (headings) keep their bold font
-- **Font size** is the dominant size by character count
-
-### Line-by-Line Insertion
-
-Instead of `insert_textbox` (which wraps text independently and produces different line breaks), the rewriter:
-
-1. Preserves the exact y-position of each original line
-2. Word-wraps the new text using the **maximum line width** across matched lines (prevents short trailing lines from forcing awkward breaks)
-3. Inserts each line individually at `(x0, baseline)` via `TextWriter.append()`
-4. Per-line auto-shrink (up to ~34%) if a line still overflows
-
-### Redaction Strategy
-
-- **One rect per matched line** (tight bbox around content spans)
-- White fill `(1, 1, 1)` ensures clean removal of old glyphs with no remnants
-- `graphics=fitz.PDF_REDACT_IMAGE_NONE` → preserves decorative elements (horizontal lines, borders)
-- Operations grouped by text colour, one `TextWriter` per colour
+This prevents rendering failures when the target font lacks glyphs for fancy Unicode characters.
 
 ## Key Invariants
 
 - **Never return a corrupt PDF** — if zero replacements match, return original bytes unchanged.
-- **Block-scoped matching** — never match spans across different PDF blocks.
-- **Claimed spans** — once a span is matched by one replacement, it's excluded from subsequent matches.
-- **Redactions are batched** — all per-page redactions are queued, then applied in one `apply_redactions()` call.
+- **Redactions are batched** — all per-page redactions are queued, then applied in one `apply_redactions()` call before any text insertion.
 - **Embedded fonts preferred** — Base-14 fallback only when font extraction fails.
+- **One match per replacement** — `search_for()` returns all rects; all are redacted but new text is inserted only at the first rect.
 
 ## Common Failure Modes
 
 | Symptom | Cause | Fix |
 |---------|-------|-----|
-| PDF unchanged | AI `old` text doesn't match any spans | Check AI prompt; verify `_norm` handles the characters; check logs |
-| Text overlaps | Replacement text longer than original | Auto-fit scales down; prompt tells AI to keep ±20% length |
-| Wrong font | Embedded font is a subset missing glyphs for new text | `_font_can_render` detects this and falls back to Base-14 |
+| PDF unchanged | AI `old` text doesn't match any page text | Check AI prompt; verify text normalisation; check logs |
+| Text overlaps | Replacement text significantly longer than original | Prompt tells AI to keep ±20% length |
+| Wrong font | Embedded font extraction failed | Falls back to Base-14 (Times/Helvetica) |
 | Garbled chars | AI produced smart quotes / em-dashes the font can't render | `_sanitize_text` maps to ASCII equivalents before insertion |
-| Huge combined bbox | Matching crossed blocks | Fixed by block-scoped matching |
-| Line-art removed | `apply_redactions` destroyed graphics | White-fill rects are per-line and tight; `graphics=IMAGE_NONE` preserves paths |
-| Spaces before punctuation break matching | LaTeX inter-char spacing | Fixed by `_norm` removing pre-punctuation spaces |
 
 ## Dependencies
 
-- **PyMuPDF (`fitz`)** — PDF manipulation (spans, redactions, TextWriter, Font extraction)
+- **PyMuPDF (`fitz`)** — PDF manipulation (search_for, redactions, TextWriter, Font extraction)
 - **`backend.models.ResumeData`** — Pydantic model with `.replacements: list[TextReplacement]`

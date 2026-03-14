@@ -8,8 +8,8 @@ Upload your resume (PDF), provide a job description (paste or URL), and get an A
 |-------|------------|
 | Frontend | React 19 + Vite 8 (TypeScript) + Tailwind CSS 4 |
 | Backend | Python + FastAPI |
-| AI | LangGraph multi-agent pipeline · Groq API (`llama-3.3-70b-versatile`) |
-| PDF | PyMuPDF (in-place text rewriting with embedded font reuse) |
+| AI | LangGraph multi-agent pipeline · Groq (`llama-3.3-70b-versatile`) or Google Gemini |
+| PDF | PyMuPDF (in-place text rewriting) · LaTeX compilation via xelatex/pdflatex |
 | Database | MongoDB (pipeline run tracking — optional) |
 | Routing | react-router-dom |
 
@@ -21,7 +21,8 @@ Upload your resume (PDF), provide a job description (paste or URL), and get an A
 
 - Python 3.11+
 - Node.js 20+
-- A free [Groq API key](https://console.groq.com/)
+- A free [Groq API key](https://console.groq.com/) or [Google Gemini API key](https://aistudio.google.com/)
+- A LaTeX distribution (optional — for `.tex` resume compilation; [MiKTeX](https://miktex.org) or TeX Live)
 - MongoDB instance (optional — for pipeline run tracking)
 
 ### 1. Clone & configure
@@ -30,7 +31,7 @@ Upload your resume (PDF), provide a job description (paste or URL), and get an A
 git clone https://github.com/abhishekDeshmukh74/pass-ats.git
 cd pass-ats
 cp .env.example .env
-# Edit .env — set GROQ_API_KEY (required) and MONGODB_URL (optional)
+# Edit .env — set GROQ_API_KEY or GEMINI_API_KEY, and optionally MONGODB_URL
 ```
 
 ### 2. Backend
@@ -88,12 +89,12 @@ Then open http://localhost:5173 in your browser.
 
 ## How It Works
 
-1. **Upload Resume** — Drag-drop or select a `.pdf` file. The backend extracts text and preserves the original file.
+1. **Upload Resume** — Drag-drop or select a `.pdf` or `.tex` file. The backend extracts text and preserves the original file.
 2. **Job Description** — Paste the JD text, or provide a URL and the backend scrapes it.
-3. **Generate** — A 6-agent LangGraph pipeline analyses, rewrites, validates, and scores your resume against the JD. The rewritten text is substituted back into the original PDF, preserving all formatting (fonts, layout, colours).
+3. **Generate** — A 7-agent LangGraph pipeline analyses, rewrites, validates, scores your resume against the JD, and compiles the final PDF. For PDF uploads the rewritten text is substituted in-place; for LaTeX uploads the source is patched and compiled.
 4. **Preview & Download** — Preview the tailored PDF inline with a before/after ATS score comparison, then download it.
 
-### AI Pipeline (6 Agents)
+### AI Pipeline (7 Agents)
 
 | # | Agent | Purpose |
 |---|-------|---------|
@@ -103,6 +104,7 @@ Then open http://localhost:5173 in your browser.
 | 4 | Rewriter | Generate verbatim old→new text replacements |
 | 5 | QA Agent | Validate replacements, deduplicate keywords |
 | 6 | Final Scorer | Score the rewritten resume, extract structured data |
+| 7 | PDF Compiler | Apply replacements to original file and produce final PDF |
 
 See [backend/services/agents/AGENTS.md](backend/services/agents/AGENTS.md) for full details.
 
@@ -125,8 +127,14 @@ See [backend/services/agents/AGENTS.md](backend/services/agents/AGENTS.md) for f
 
 | Variable | Required | Description |
 |----------|----------|-------------|
-| `GROQ_API_KEY` | Yes | API key from [console.groq.com](https://console.groq.com/) |
+| `GROQ_API_KEY` | Yes* | API key from [console.groq.com](https://console.groq.com/) |
+| `GEMINI_API_KEY` | Yes* | API key from [aistudio.google.com](https://aistudio.google.com/) |
+| `LLM_PROVIDER` | No | `"groq"` (default) or `"gemini"` |
+| `GROQ_MODEL` | No | Groq model name (default: `llama-3.3-70b-versatile`) |
+| `GEMINI_MODEL` | No | Gemini model name (default: `gemini-2.0-flash`) |
 | `MONGODB_URL` | No | MongoDB connection string for pipeline run tracking |
+
+\* At least one of `GROQ_API_KEY` or `GEMINI_API_KEY` is required, depending on `LLM_PROVIDER`.
 
 ---
 
@@ -144,18 +152,21 @@ pass-ats/
 │   │   └── pipeline.py      # Pipeline run inspection
 │   └── services/
 │       ├── parser.py         # PDF text extraction (PyMuPDF)
+│       ├── latex_parser.py   # LaTeX (.tex) text extraction
 │       ├── scraper.py        # URL → plain text (httpx + BeautifulSoup)
 │       ├── rewriter.py       # In-place PDF text replacement
+│       ├── latex_rewriter.py # LaTeX source patching + compilation
 │       ├── db.py             # MongoDB pipeline run persistence
 │       └── agents/           # LangGraph multi-agent pipeline
 │           ├── graph.py              # StateGraph wiring + pipeline tracking
 │           ├── state.py              # Shared AgentState TypedDict
-│           ├── llm.py                # ChatGroq instance + JSON parser
+│           ├── llm.py                # Multi-provider LLM (Groq/Gemini) + JSON parser
 │           ├── keyword_extractor.py  # Agent 1
 │           ├── resume_analyser.py    # Agent 2
 │           ├── scorer.py             # Agents 3 & 6
 │           ├── rewriter_agent.py     # Agent 4
-│           └── qa_agent.py           # Agent 5
+│           ├── qa_agent.py           # Agent 5
+│           └── pdf_compiler.py       # Agent 7
 ├── frontend/                # React SPA
 │   └── src/
 │       ├── App.tsx           # Root — routing + step wizard
