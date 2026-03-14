@@ -22,6 +22,7 @@ from backend.services.agents.resume_analyser import analyse_resume
 from backend.services.agents.rewriter_agent import rewrite_sections
 from backend.services.agents.qa_agent import qa_and_deduplicate
 from backend.services.agents.scorer import score_before_rewrite, score_and_extract
+from backend.services.agents.pdf_compiler import compile_pdf
 from backend.services.db import (
     create_pipeline_run,
     save_agent_step,
@@ -45,6 +46,7 @@ _AGENT_INPUT_KEYS: dict[str, list[str]] = {
     "rewrite_sections": ["resume_text", "keyword_categories", "gap_analysis"],
     "qa_deduplicate": ["resume_text", "raw_replacements", "jd_keywords"],
     "score_extract": ["resume_text", "jd_text", "jd_keywords", "replacements"],
+    "compile_pdf": ["replacements", "resume_file_b64", "resume_file_type"],
 }
 
 
@@ -55,14 +57,12 @@ def _tracked(agent_name: str, agent_fn):
     def wrapper(state: AgentState) -> dict:
         run_id = _current_run_id.get()
 
-        # Build input summary (truncate large values)
+        # Build input summary
         input_summary: dict = {}
         for key in input_keys:
             val = state.get(key)
-            if isinstance(val, str) and len(val) > 300:
-                input_summary[key] = val[:300] + "…"
-            elif isinstance(val, list):
-                input_summary[key] = f"[{len(val)} items]"
+            if isinstance(val, list):
+                input_summary[key] = val
             else:
                 input_summary[key] = val
 
@@ -86,6 +86,7 @@ _builder.add_node("score_before", _tracked("score_before", score_before_rewrite)
 _builder.add_node("rewrite_sections", _tracked("rewrite_sections", rewrite_sections))
 _builder.add_node("qa_deduplicate", _tracked("qa_deduplicate", qa_and_deduplicate))
 _builder.add_node("score_extract", _tracked("score_extract", score_and_extract))
+_builder.add_node("compile_pdf", _tracked("compile_pdf", compile_pdf))
 
 _builder.set_entry_point("extract_keywords")
 _builder.add_edge("extract_keywords", "analyse_resume")
@@ -93,16 +94,27 @@ _builder.add_edge("analyse_resume", "score_before")
 _builder.add_edge("score_before", "rewrite_sections")
 _builder.add_edge("rewrite_sections", "qa_deduplicate")
 _builder.add_edge("qa_deduplicate", "score_extract")
-_builder.add_edge("score_extract", END)
+_builder.add_edge("score_extract", "compile_pdf")
+_builder.add_edge("compile_pdf", END)
 
 graph = _builder.compile()
 
 
 # ── Public API (drop-in replacement for groq_service.generate_resume) ─────
 
-def generate_resume(resume_text: str, jd_text: str) -> ResumeData:
-    """Run the full multi-agent pipeline and return a ResumeData object."""
-    logger.info("Starting LangGraph pipeline (6 agents).")
+def generate_resume(
+    resume_text: str,
+    jd_text: str,
+    resume_file_b64: str = "",
+    resume_file_type: str = "pdf",
+) -> tuple[ResumeData, str]:
+    """Run the full multi-agent pipeline.
+
+    Returns:
+        (ResumeData, compiled_pdf_b64)  where *compiled_pdf_b64* is the
+        base64-encoded rewritten PDF produced by the final compile_pdf node.
+    """
+    logger.info("Starting LangGraph pipeline (7 agents).")
 
     run_id = create_pipeline_run(resume_text, jd_text)
     token = _current_run_id.set(run_id)
@@ -130,6 +142,9 @@ def generate_resume(resume_text: str, jd_text: str) -> ResumeData:
         "experience": [],
         "education": [],
         "certifications": [],
+        "resume_file_b64": resume_file_b64,
+        "resume_file_type": resume_file_type,
+        "compiled_pdf_b64": "",
     }
 
     try:
@@ -157,6 +172,8 @@ def generate_resume(resume_text: str, jd_text: str) -> ResumeData:
         logger.info("Pipeline complete: %d replacements, ATS score=%s.",
                      n, resume.ats_score)
 
+        compiled_pdf_b64: str = final.get("compiled_pdf_b64", "")
+
         complete_pipeline_run(run_id, {
             "ats_score_before": resume.ats_score_before,
             "ats_score": resume.ats_score,
@@ -165,7 +182,7 @@ def generate_resume(resume_text: str, jd_text: str) -> ResumeData:
             "name": resume.name,
         })
 
-        return resume
+        return resume, compiled_pdf_b64
 
     except Exception as exc:
         fail_pipeline_run(run_id, str(exc))

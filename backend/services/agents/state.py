@@ -55,3 +55,8 @@ class AgentState(TypedDict, total=False):
     experience: Annotated[list[dict], _merge_lists]
     education: Annotated[list[dict], _merge_lists]
     certifications: Annotated[list[dict], _merge_lists]
+
+    # ── Step 7 → PDF Compiler ─────────────────────────────────────────
+    resume_file_b64: Annotated[str, _overwrite]    # Original file (b64) passed in for rewriting
+    resume_file_type: Annotated[str, _overwrite]   # "pdf" or "tex"
+    compiled_pdf_b64: Annotated[str, _overwrite]   # Final compiled/rewritten PDF (b64)
