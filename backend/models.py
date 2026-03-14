@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional
 
 
@@ -17,6 +17,13 @@ class EducationItem(BaseModel):
     location: Optional[str] = None
     graduation_date: str
     details: Optional[list[str]] = None
+
+    @field_validator("details", mode="before")
+    @classmethod
+    def coerce_details_to_list(cls, v):
+        if isinstance(v, str):
+            return [v] if v.strip() else None
+        return v
 
 
 class CertificationItem(BaseModel):
