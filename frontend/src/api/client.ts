@@ -77,6 +77,7 @@ export interface PipelineRun {
     replacements_count: number;
     name: string;
   };
+  has_compiled_pdf?: boolean;
   error?: string;
 }
 
@@ -88,4 +89,8 @@ export async function getPipelineRuns(limit = 20, skip = 0): Promise<PipelineRun
 export async function getPipelineRun(id: string): Promise<PipelineRun> {
   const res = await fetch(`${BASE}/pipeline-runs/${encodeURIComponent(id)}`);
   return handleResponse<PipelineRun>(res);
+}
+
+export function getPipelineRunPdfUrl(id: string): string {
+  return `${BASE}/pipeline-runs/${encodeURIComponent(id)}/pdf`;
 }

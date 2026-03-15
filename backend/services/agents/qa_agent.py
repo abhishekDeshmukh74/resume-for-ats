@@ -33,12 +33,23 @@ Your job is to review and FIX every replacement to ensure quality:
    - Example: if "microservices" appears 5 times, keep it in the 2 most relevant
      bullets and use "distributed services", "service-oriented", etc. in others
 
-3. LENGTH: Each "new" text should be within ±20% of its "old" text length.
+3. METRIC PRESERVATION: Every number, percentage, throughput figure, latency,
+   user count, and time-saving from the "old" text MUST appear in the "new" text.
+   If a replacement drops metrics (e.g. changes "reducing triage time by 40%" to
+   "ensuring reliability"), restore the original metrics. Numbers make recruiters
+   stop scrolling — never dilute them.
+
+4. NO FILLER PADDING: Remove vague trailing phrases that were not in the original,
+   such as "ensuring customer success", "while ensuring mentorship and code reviews",
+   "applying expertise", "ensuring collaboration and communication".
+   Only add keywords that genuinely describe the actual work.
+
+5. LENGTH: Each "new" text should be within ±20% of its "old" text length.
    If too long, cut filler words. If too short, add relevant detail.
 
-4. NATURALNESS: The "new" text must read naturally, not like keyword stuffing.
+6. NATURALNESS: The "new" text must read naturally, not like keyword stuffing.
 
-5. NO IDENTICAL PAIRS: Remove any replacement where old == new.
+7. NO IDENTICAL PAIRS: Remove any replacement where old == new.
 
 6. SKILLS SECTION — COMMA-SEPARATED KEYWORDS ONLY:
    Any replacement whose "old" text matches a skills-line pattern

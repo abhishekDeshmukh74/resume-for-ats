@@ -28,6 +28,7 @@ from backend.services.db import (
     save_agent_step,
     complete_pipeline_run,
     fail_pipeline_run,
+    save_compiled_pdf,
 )
 
 logger = logging.getLogger(__name__)
@@ -181,6 +182,8 @@ def generate_resume(
             "replacements_count": n,
             "name": resume.name,
         })
+
+        save_compiled_pdf(run_id, compiled_pdf_b64)
 
         return resume, compiled_pdf_b64
 

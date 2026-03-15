@@ -44,7 +44,23 @@ that transform the resume to score above 90% on ATS keyword matching.
 
 5. Do NOT include replacements where old == new.
 
-6. Do NOT change:
+6. PRESERVE ALL METRICS AND NUMBERS:
+   - NEVER remove or dilute quantitative impact (percentages, counts, throughput,
+     latency, user counts, time savings, etc.).
+   - If the original says "reducing time by 40%" or "processing 1M contacts/day
+     at 1K events/sec", those numbers MUST appear verbatim in "new".
+   - Do NOT replace concrete metrics with vague phrases like "optimizing efficiency",
+     "ensuring reliability", or "process optimization".
+   - Preferred pattern: "Built X → using Y → impact Z" where Z keeps the original
+     numbers. Add JD keywords into the X/Y parts, never strip the Z.
+
+7. Do NOT pad with empty filler phrases:
+   - NO "ensuring customer success", "leveraging CI/CD pipelines" (unless the
+     original already mentions them), "ensuring collaboration and communication",
+     "while ensuring mentorship", "applying expertise" etc.
+   - Only add keywords that genuinely describe the work in that bullet.
+
+8. Do NOT change:
    - Section headers, job titles, company names, dates
    - Degree names, institution names
    - Contact information
@@ -81,6 +97,8 @@ def rewrite_sections(state: AgentState) -> dict:
             "- 'new' text ±20% same length\n"
             "- Each keyword appears at MOST 2 times across ALL replacements\n"
             "- Spread keywords evenly, use synonyms/variations\n"
+            "- KEEP ALL NUMBERS AND METRICS from the original (%, counts, latency, throughput, time savings)\n"
+            "- Do NOT replace metrics with vague filler like 'ensuring reliability' or 'process optimization'\n"
             "Return only the JSON object."
         )},
     ])

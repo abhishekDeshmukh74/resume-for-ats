@@ -11,6 +11,7 @@ import os
 from datetime import datetime, timezone
 from typing import Any
 
+from bson import Binary, ObjectId
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
@@ -100,8 +101,6 @@ def save_agent_step(
     db = _get_db()
     if db is None:
         return
-    from bson import ObjectId
-
     step = {
         "name": agent_name,
         "duration_ms": duration_ms,
@@ -123,8 +122,6 @@ def complete_pipeline_run(run_id: str | None, final_result: dict) -> None:
     db = _get_db()
     if db is None:
         return
-    from bson import ObjectId
-
     try:
         db.pipeline_runs.update_one(
             {"_id": ObjectId(run_id)},
@@ -144,8 +141,6 @@ def fail_pipeline_run(run_id: str | None, error: str) -> None:
     db = _get_db()
     if db is None:
         return
-    from bson import ObjectId
-
     try:
         db.pipeline_runs.update_one(
             {"_id": ObjectId(run_id)},
@@ -157,6 +152,46 @@ def fail_pipeline_run(run_id: str | None, error: str) -> None:
         )
     except PyMongoError as e:
         logger.warning("Failed to mark pipeline run as failed: %s", e)
+
+
+def save_compiled_pdf(run_id: str | None, pdf_b64: str) -> None:
+    """Store the compiled PDF (as binary) on the pipeline run document."""
+    if not run_id or not pdf_b64:
+        return
+    db = _get_db()
+    if db is None:
+        return
+    import base64
+
+    try:
+        pdf_bytes = base64.b64decode(pdf_b64)
+        db.pipeline_runs.update_one(
+            {"_id": ObjectId(run_id)},
+            {"$set": {
+                "compiled_pdf": Binary(pdf_bytes),
+                "has_compiled_pdf": True,
+            }},
+        )
+    except PyMongoError as e:
+        logger.warning("Failed to save compiled PDF: %s", e)
+
+
+def get_compiled_pdf(run_id: str) -> bytes | None:
+    """Retrieve the compiled PDF bytes for a pipeline run."""
+    db = _get_db()
+    if db is None:
+        return None
+    try:
+        doc = db.pipeline_runs.find_one(
+            {"_id": ObjectId(run_id)},
+            {"compiled_pdf": 1},
+        )
+        if doc and doc.get("compiled_pdf"):
+            return bytes(doc["compiled_pdf"])
+        return None
+    except PyMongoError as e:
+        logger.warning("Failed to fetch compiled PDF for %s: %s", run_id, e)
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +212,7 @@ def get_pipeline_runs(limit: int = 20, skip: int = 0) -> list[dict]:
                 "created_at": 1,
                 "completed_at": 1,
                 "final_result": 1,
+                "has_compiled_pdf": 1,
                 "agents.name": 1,
                 "agents.duration_ms": 1,
             })
@@ -198,10 +234,11 @@ def get_pipeline_run(run_id: str) -> dict | None:
     db = _get_db()
     if db is None:
         return None
-    from bson import ObjectId
-
     try:
-        doc = db.pipeline_runs.find_one({"_id": ObjectId(run_id)})
+        doc = db.pipeline_runs.find_one(
+            {"_id": ObjectId(run_id)},
+            {"compiled_pdf": 0},
+        )
         if doc:
             doc["_id"] = str(doc["_id"])
         return doc

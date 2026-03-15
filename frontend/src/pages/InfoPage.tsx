@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { getPipelineRuns, getPipelineRun } from '../api/client';
+import { getPipelineRuns, getPipelineRun, getPipelineRunPdfUrl } from '../api/client';
 import type { PipelineRun, AgentStep } from '../api/client';
 import { Link } from 'react-router-dom';
 
@@ -217,7 +217,21 @@ function RunDetail({ runId, onBack }: { runId: string; onBack: () => void }) {
                 {run.final_result.matched_keywords?.length ?? 0} keywords matched
               </p>
             </div>
-            <span className="text-3xl font-bold text-blue-700">{run.final_result.ats_score}%</span>
+            <div className="flex items-center gap-3">
+              <span className="text-3xl font-bold text-blue-700">{run.final_result.ats_score}%</span>
+              {run.has_compiled_pdf && (
+                <a
+                  href={getPipelineRunPdfUrl(run._id)}
+                  download
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold rounded-lg transition-colors"
+                >
+                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Download Resume
+                </a>
+              )}
+            </div>
           </div>
           {run.final_result.ats_score_before != null && (
             <div className="flex items-center gap-4 text-sm">

@@ -1,22 +1,53 @@
 import json
 import logging
 import os
-from groq import Groq
+from groq import Groq, RateLimitError
 from backend.models import ResumeData
 
 logger = logging.getLogger(__name__)
 
-_client: Groq | None = None
+_clients: list[Groq] = []
+_current_idx: int = 0
+
+
+def _get_groq_api_keys() -> list[str]:
+    """Read GROQ API keys from env (comma-separated GROQ_API_KEYS, fallback GROQ_API_KEY)."""
+    keys_csv = os.environ.get("GROQ_API_KEYS", "")
+    if keys_csv:
+        keys = [k.strip() for k in keys_csv.split(",") if k.strip()]
+        if keys:
+            return keys
+    single = os.environ.get("GROQ_API_KEY", "")
+    if single.strip():
+        return [single.strip()]
+    raise RuntimeError(
+        "Neither GROQ_API_KEYS nor GROQ_API_KEY environment variable is set."
+    )
+
+
+def _init_clients() -> None:
+    global _clients
+    if not _clients:
+        keys = _get_groq_api_keys()
+        _clients = [Groq(api_key=k) for k in keys]
+        logger.info("Initialised %d Groq client(s)", len(_clients))
 
 
 def _get_client() -> Groq:
-    global _client
-    if _client is None:
-        api_key = os.environ.get("GROQ_API_KEY")
-        if not api_key:
-            raise RuntimeError("GROQ_API_KEY environment variable is not set.")
-        _client = Groq(api_key=api_key)
-    return _client
+    _init_clients()
+    return _clients[_current_idx]
+
+
+def _rotate_client() -> bool:
+    """Rotate to the next API key. Returns False if all keys exhausted."""
+    global _current_idx
+    _init_clients()
+    next_idx = (_current_idx + 1) % len(_clients)
+    if next_idx == _current_idx:
+        return False  # only one key, can't rotate
+    _current_idx = next_idx
+    logger.info("Rotated to Groq API key #%d", _current_idx + 1)
+    return True
 
 
 _SYSTEM_PROMPT = """You are an expert ATS (Applicant Tracking System) resume optimiser.
@@ -105,8 +136,8 @@ Return ONLY valid JSON."""
 
 
 def generate_resume(resume_text: str, jd_text: str) -> ResumeData:
-    """Call Groq to generate a tailored resume with explicit replacement pairs."""
-    client = _get_client()
+    """Call Groq to generate a tailored resume with explicit replacement pairs.
+    Automatically rotates API keys on rate-limit errors."""
 
     user_prompt = (
         f"## Original Resume\n\n{resume_text}\n\n"
@@ -123,16 +154,34 @@ def generate_resume(resume_text: str, jd_text: str) -> ResumeData:
         "Return only the JSON object."
     )
 
-    completion = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_prompt},
-        ],
-        temperature=0.2,
-        max_tokens=8192,
-        response_format={"type": "json_object"},
-    )
+    _init_clients()
+    tried = 0
+    last_err: Exception | None = None
+
+    while tried < len(_clients):
+        client = _get_client()
+        try:
+            completion = client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[
+                    {"role": "system", "content": _SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0.2,
+                max_tokens=8192,
+                response_format={"type": "json_object"},
+            )
+            break
+        except RateLimitError as exc:
+            last_err = exc
+            tried += 1
+            logger.warning("Rate-limited on key #%d: %s", _current_idx + 1, exc)
+            if not _rotate_client():
+                break
+    else:
+        raise RuntimeError(
+            f"All {len(_clients)} Groq API key(s) are rate-limited."
+        ) from last_err
 
     raw = completion.choices[0].message.content
     data = json.loads(raw)
