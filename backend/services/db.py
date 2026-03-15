@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from bson import Binary, ObjectId
+from bson.codec_options import CodecOptions
 from pymongo import MongoClient
 from pymongo.errors import PyMongoError
 
@@ -32,7 +33,9 @@ def _get_db():
     try:
         _client = MongoClient(url, serverSelectionTimeoutMS=5000)
         _client.admin.command("ping")
-        _db = _client.get_default_database()
+        _db = _client.get_default_database().with_options(
+            CodecOptions(tz_aware=True, tzinfo=timezone.utc)
+        )
         logger.info("Connected to MongoDB: %s", _db.name)
         return _db
     except PyMongoError as e:
