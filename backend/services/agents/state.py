@@ -30,6 +30,11 @@ class AgentState(TypedDict, total=False):
     resume_sections: Annotated[dict, _overwrite]      # Identified sections & their text
     gap_analysis: Annotated[str, _overwrite]           # Missing keywords / weak areas
 
+    # ── Step 2b → Keyword gap tracking ───────────────────────────────
+    missing_keywords: Annotated[list[str], _overwrite]     # Keywords NOT yet in resume
+    required_keywords: Annotated[list[str], _overwrite]    # High-priority required skills
+    preferred_keywords: Annotated[list[str], _overwrite]   # Nice-to-have skills
+
     # ── Step 3 → Rewriter ─────────────────────────────────────────────
     raw_replacements: Annotated[list[dict], _merge_lists]  # {"old": ..., "new": ...}
 
@@ -41,7 +46,10 @@ class AgentState(TypedDict, total=False):
 
     # ── Step 5 → ATS Scorer ───────────────────────────────────────────
     ats_score: Annotated[int, _overwrite]
-    matched_keywords: Annotated[list[str], _merge_lists]
+    algorithmic_score: Annotated[float, _overwrite]        # Deterministic word-boundary score
+    matched_keywords: Annotated[list[str], _overwrite]     # Overwrite (not merge) for re-score
+    still_missing_keywords: Annotated[list[str], _overwrite]  # After rewrite, still missing
+    rewrite_pass: Annotated[int, _overwrite]               # 0 = first pass, 1 = refinement
 
     # ── Structured output (for ResumeData) ────────────────────────────
     name: Annotated[str, _overwrite]

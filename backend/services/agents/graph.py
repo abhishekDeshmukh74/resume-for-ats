@@ -1,7 +1,9 @@
-"""LangGraph pipeline — wires all 7 agents into a sequential graph.
+"""LangGraph pipeline — wires agents into a sequential graph with refinement loop.
 
 Flow:
-  extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate → score_extract → compile_pdf
+  extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate
+  → score_extract → [if score < 90 & pass == 0: refine_rewrite → refine_qa → score_extract]
+  → compile_pdf
 
 Each node reads from / writes to the shared AgentState.
 Agent I/O is persisted to MongoDB for the /info UI.
@@ -20,6 +22,7 @@ from backend.services.agents.state import AgentState
 from backend.services.agents.keyword_extractor import extract_keywords
 from backend.services.agents.resume_analyser import analyse_resume
 from backend.services.agents.rewriter_agent import rewrite_sections
+from backend.services.agents.refinement_agent import refine_rewrite
 from backend.services.agents.qa_agent import qa_and_deduplicate
 from backend.services.agents.scorer import score_before_rewrite, score_and_extract
 from backend.services.agents.pdf_compiler import compile_pdf
@@ -44,9 +47,11 @@ _AGENT_INPUT_KEYS: dict[str, list[str]] = {
     "extract_keywords": ["jd_text"],
     "analyse_resume": ["resume_text", "jd_keywords"],
     "score_before": ["resume_text", "jd_keywords"],
-    "rewrite_sections": ["resume_text", "keyword_categories", "gap_analysis"],
+    "rewrite_sections": ["resume_text", "keyword_categories", "gap_analysis", "missing_keywords", "required_keywords"],
     "qa_deduplicate": ["resume_text", "raw_replacements", "jd_keywords"],
     "score_extract": ["resume_text", "jd_text", "jd_keywords", "replacements"],
+    "refine_rewrite": ["resume_text", "replacements", "still_missing_keywords", "required_keywords", "keyword_categories"],
+    "refine_qa": ["resume_text", "raw_replacements", "jd_keywords"],
     "compile_pdf": ["replacements", "resume_file_b64", "resume_file_type"],
 }
 
@@ -79,6 +84,24 @@ def _tracked(agent_name: str, agent_fn):
 
 # ── Build the graph ───────────────────────────────────────────────────────
 
+_ATS_TARGET = 90  # Score threshold; below this triggers a refinement pass
+
+
+def _should_refine(state: AgentState) -> str:
+    """Conditional edge: decide whether to refine or go straight to compile."""
+    score = state.get("ats_score", 0)
+    pass_num = state.get("rewrite_pass", 0)
+    missing = state.get("still_missing_keywords", [])
+
+    if score < _ATS_TARGET and pass_num == 0 and len(missing) > 0:
+        logger.info(
+            "Score %d < %d with %d missing keywords — running refinement pass.",
+            score, _ATS_TARGET, len(missing),
+        )
+        return "refine_rewrite"
+    return "compile_pdf"
+
+
 _builder = StateGraph(AgentState)
 
 _builder.add_node("extract_keywords", _tracked("extract_keywords", extract_keywords))
@@ -87,6 +110,8 @@ _builder.add_node("score_before", _tracked("score_before", score_before_rewrite)
 _builder.add_node("rewrite_sections", _tracked("rewrite_sections", rewrite_sections))
 _builder.add_node("qa_deduplicate", _tracked("qa_deduplicate", qa_and_deduplicate))
 _builder.add_node("score_extract", _tracked("score_extract", score_and_extract))
+_builder.add_node("refine_rewrite", _tracked("refine_rewrite", refine_rewrite))
+_builder.add_node("refine_qa", _tracked("refine_qa", qa_and_deduplicate))
 _builder.add_node("compile_pdf", _tracked("compile_pdf", compile_pdf))
 
 _builder.set_entry_point("extract_keywords")
@@ -95,7 +120,15 @@ _builder.add_edge("analyse_resume", "score_before")
 _builder.add_edge("score_before", "rewrite_sections")
 _builder.add_edge("rewrite_sections", "qa_deduplicate")
 _builder.add_edge("qa_deduplicate", "score_extract")
-_builder.add_edge("score_extract", "compile_pdf")
+
+# Conditional: refine if score < 90, otherwise go to compile
+_builder.add_conditional_edges("score_extract", _should_refine, {
+    "refine_rewrite": "refine_rewrite",
+    "compile_pdf": "compile_pdf",
+})
+_builder.add_edge("refine_rewrite", "refine_qa")
+_builder.add_edge("refine_qa", "compile_pdf")
+
 _builder.add_edge("compile_pdf", END)
 
 graph = _builder.compile()
@@ -127,11 +160,17 @@ def generate_resume(
         "keyword_categories": {},
         "resume_sections": {},
         "gap_analysis": "",
+        "missing_keywords": [],
+        "required_keywords": [],
+        "preferred_keywords": [],
         "raw_replacements": [],
         "replacements": [],
         "ats_score_before": 0,
         "ats_score": 0,
+        "algorithmic_score": 0.0,
         "matched_keywords": [],
+        "still_missing_keywords": [],
+        "rewrite_pass": 0,
         "name": "",
         "email": None,
         "phone": None,

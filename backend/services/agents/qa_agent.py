@@ -13,6 +13,54 @@ from backend.services.agents.state import AgentState
 
 logger = logging.getLogger(__name__)
 
+# ── AI phrase blacklist (inspired by Resume-Matcher) ──────────────────────
+#
+# These phrases sound AI-generated and may trigger recruiter suspicion.
+# We replace them with simpler, human-sounding alternatives.
+_AI_PHRASE_REPLACEMENTS: dict[str, str] = {
+    "spearheaded": "led",
+    "orchestrated": "coordinated",
+    "synergized": "collaborated",
+    "leveraged": "used",
+    "revolutionized": "transformed",
+    "pioneered": "introduced",
+    "catalyzed": "initiated",
+    "operationalized": "implemented",
+    "architected": "designed",
+    "effectuated": "completed",
+    "endeavored": "worked",
+    "facilitated": "helped",
+    "utilized": "used",
+    "synergy": "collaboration",
+    "paradigm shift": "change",
+    "best-in-class": "top-performing",
+    "world-class": "high-quality",
+    "cutting-edge": "modern",
+    "bleeding-edge": "modern",
+    "game-changing": "innovative",
+    "holistic": "comprehensive",
+    "actionable": "practical",
+    "in order to": "to",
+    "for the purpose of": "to",
+    "at the end of the day": "",
+    "moving forward": "",
+    "going forward": "",
+    "on a daily basis": "daily",
+    "in a timely manner": "promptly",
+    "due to the fact that": "because",
+}
+
+
+def _clean_ai_phrases(text: str) -> str:
+    """Replace AI-sounding phrases with simpler alternatives."""
+    cleaned = text
+    for phrase, replacement in _AI_PHRASE_REPLACEMENTS.items():
+        pattern = re.compile(re.escape(phrase), re.IGNORECASE)
+        cleaned = pattern.sub(replacement, cleaned)
+    # Clean up double spaces from removals
+    cleaned = re.sub(r"  +", " ", cleaned).strip()
+    return cleaned
+
 _SYSTEM = """You are a QA reviewer for ATS resume optimisation.
 
 You receive:
@@ -151,6 +199,8 @@ def qa_and_deduplicate(state: AgentState) -> dict:
             continue
         seen_old.add(old)
         new = _enforce_skills_format(old, new)
+        # Clean AI-sounding phrases from new text
+        new = _clean_ai_phrases(new)
         if old == new:
             continue
         final.append(TextReplacement(old=old, new=new))

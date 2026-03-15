@@ -13,11 +13,21 @@ _SYSTEM = """You are an expert ATS resume rewriter.
 
 You receive:
 - The EXACT original resume text
-- Categorised JD keywords
+- Categorised JD keywords (with REQUIRED vs PREFERRED distinction)
+- Keywords that are MISSING from the resume (your primary target)
 - A gap analysis telling you which keywords to add where
 
 Your job is to produce a JSON array of {"old": "...", "new": "..."} replacements
 that transform the resume to score above 90% on ATS keyword matching.
+
+═══ PRIMARY GOAL: MAXIMIZE KEYWORD COVERAGE ═══
+
+You MUST incorporate as many MISSING keywords as possible. Prioritise:
+1. REQUIRED keywords (must-have) — every single one should appear in the resume
+2. PREFERRED keywords — include as many as naturally fit
+3. Use exact keyword phrasing from the JD where possible (ATS systems do exact matching)
+4. Also include common VARIATIONS and SYNONYMS alongside the exact keyword
+   (e.g., both "CI/CD" and "continuous integration")
 
 ═══ CRITICAL REPLACEMENT RULES ═══
 
@@ -65,6 +75,10 @@ that transform the resume to score above 90% on ATS keyword matching.
    - Degree names, institution names
    - Contact information
 
+9. SKILLS SECTION IS THE EASIEST WIN:
+   - If a skills line exists, add ALL missing technical keywords there.
+   - Keep comma-separated format. Do NOT add prose.
+
 ═══ RESPONSE FORMAT (pure JSON, no markdown) ═══
 
 {
@@ -78,25 +92,44 @@ def rewrite_sections(state: AgentState) -> dict:
     """Node: generate old→new replacement pairs."""
     categories = state.get("keyword_categories", {})
     gap = state.get("gap_analysis", "")
+    missing = state.get("missing_keywords", [])
+    required = state.get("required_keywords", [])
+    preferred = state.get("preferred_keywords", [])
 
     keywords_block = "\n".join(
         f"- {cat}: {', '.join(kws)}"
         for cat, kws in categories.items()
     )
 
+    # Build priority info for the LLM
+    missing_required = [kw for kw in missing if kw in required]
+    missing_preferred = [kw for kw in missing if kw in preferred]
+    missing_other = [kw for kw in missing if kw not in required and kw not in preferred]
+
+    priority_block = ""
+    if missing_required:
+        priority_block += f"\n🔴 MUST ADD (required, currently missing): {', '.join(missing_required)}"
+    if missing_preferred:
+        priority_block += f"\n🟡 SHOULD ADD (preferred, currently missing): {', '.join(missing_preferred)}"
+    if missing_other:
+        priority_block += f"\n🟢 NICE TO ADD (other missing): {', '.join(missing_other)}"
+
     data = invoke_llm_json([
         {"role": "system", "content": _SYSTEM},
         {"role": "user", "content": (
             f"## Original Resume\n\n{state['resume_text']}\n\n"
             f"## JD Keywords by Category\n\n{keywords_block}\n\n"
+            f"## MISSING Keywords (these MUST be added){priority_block}\n\n"
             f"## Gap Analysis\n\n{gap}\n\n"
             "Now generate the replacements array. Remember:\n"
             "- VERBATIM 'old' text from the resume above\n"
             "- 'new' text ±20% same length\n"
             "- Each keyword appears at MOST 2 times across ALL replacements\n"
+            "- PRIORITISE adding the REQUIRED missing keywords above all else\n"
             "- Spread keywords evenly, use synonyms/variations\n"
             "- KEEP ALL NUMBERS AND METRICS from the original (%, counts, latency, throughput, time savings)\n"
             "- Do NOT replace metrics with vague filler like 'ensuring reliability' or 'process optimization'\n"
+            "- Add ALL missing technical keywords to the skills section\n"
             "Return only the JSON object."
         )},
     ])

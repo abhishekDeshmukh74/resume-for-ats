@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 
 from backend.services.agents.llm import invoke_llm_json
+from backend.services.agents.keyword_matcher import calculate_keyword_match
 from backend.services.agents.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,16 @@ SCORING RULES:
 def score_before_rewrite(state: AgentState) -> dict:
     """Node: score the original resume BEFORE any rewriting."""
     keywords = state.get("jd_keywords", [])
+    categories = state.get("keyword_categories", {})
+
+    # Algorithmic score: deterministic word-boundary matching
+    algo_result = calculate_keyword_match(
+        state["resume_text"], keywords, categories=categories,
+    )
+    logger.info(
+        "ATS Pre-Rewrite Algorithmic: %.1f%% (%d matched, %d missing)",
+        algo_result.match_percentage, len(algo_result.matched), len(algo_result.missing),
+    )
 
     data = invoke_llm_json([
         {"role": "system", "content": _SCORE_BEFORE_SYSTEM},
@@ -86,10 +97,17 @@ def score_before_rewrite(state: AgentState) -> dict:
             "Score the original resume against these keywords."
         )},
     ])
-    score = data.get("ats_score_before", 0)
-    logger.info("ATS Pre-Rewrite Score: %d", score)
+    llm_score = data.get("ats_score_before", 0)
 
-    return {"ats_score_before": score}
+    # Use the lower of LLM and algorithmic as conservative estimate
+    score = min(llm_score, int(algo_result.match_percentage))
+    logger.info("ATS Pre-Rewrite Score: %d (LLM=%d, Algo=%.1f)",
+                score, llm_score, algo_result.match_percentage)
+
+    return {
+        "ats_score_before": score,
+        "missing_keywords": algo_result.missing,
+    }
 
 
 def _apply_replacements_to_text(resume_text: str, replacements: list) -> str:
@@ -107,6 +125,16 @@ def score_and_extract(state: AgentState) -> dict:
     rewritten_text = _apply_replacements_to_text(state["resume_text"], replacements)
 
     keywords = state.get("jd_keywords", [])
+    categories = state.get("keyword_categories", {})
+
+    # Algorithmic score: deterministic word-boundary matching
+    algo_result = calculate_keyword_match(
+        rewritten_text, keywords, categories=categories,
+    )
+    logger.info(
+        "ATS Post-Rewrite Algorithmic: %.1f%% (%d matched, %d missing)",
+        algo_result.match_percentage, len(algo_result.matched), len(algo_result.missing),
+    )
 
     data = invoke_llm_json([
         {"role": "system", "content": _SYSTEM},
@@ -118,14 +146,22 @@ def score_and_extract(state: AgentState) -> dict:
         )},
     ])
 
-    score = data.get("ats_score", 0)
-    matched = data.get("matched_keywords", [])
+    llm_score = data.get("ats_score", 0)
 
-    logger.info("ATS Scorer: score=%d, matched=%d keywords.", score, len(matched))
+    # Use the algorithmic score as primary (it's deterministic and verifiable),
+    # but average with LLM score to account for semantic matches the regex misses
+    algo_pct = algo_result.match_percentage
+    blended_score = int(round(algo_pct * 0.6 + llm_score * 0.4))
+    matched = algo_result.matched  # Use algorithmic matched list (verifiable)
+
+    logger.info("ATS Scorer: blended=%d (algo=%.1f, llm=%d), matched=%d keywords.",
+                blended_score, algo_pct, llm_score, len(matched))
 
     return {
-        "ats_score": score,
+        "ats_score": blended_score,
+        "algorithmic_score": algo_pct,
         "matched_keywords": matched,
+        "still_missing_keywords": algo_result.missing,
         "name": data.get("name", ""),
         "email": data.get("email"),
         "phone": data.get("phone"),

@@ -23,7 +23,9 @@ Return ONLY valid JSON:
     "domain_knowledge": ["microservices", "CI/CD", ...],
     "certifications": ["AWS Certified", ...],
     "action_verbs": ["architected", "optimised", ...]
-  }
+  },
+  "required_skills": ["Python", "React", "AWS"],
+  "preferred_skills": ["Kubernetes", "Terraform"]
 }
 
 RULES:
@@ -32,7 +34,14 @@ RULES:
 - Include implied skills (e.g. if "full stack" is mentioned, include both frontend and backend terms).
 - Normalise casing (e.g. "javascript" → "JavaScript").
 - Do NOT duplicate keywords across categories.
-- Include important action verbs from the JD."""
+- Include important action verbs from the JD.
+- "required_skills" = skills explicitly stated as required, mandatory, or must-have, plus any
+  skills mentioned multiple times or in core responsibilities. These are the highest priority.
+- "preferred_skills" = skills stated as preferred, nice-to-have, bonus, or mentioned only once
+  in a secondary context.
+- Every keyword in required_skills and preferred_skills MUST also appear in the main "keywords" list.
+- If the JD doesn't clearly distinguish required vs preferred, treat skills in the top
+  responsibilities and qualifications as required, and everything else as preferred."""
 
 
 def extract_keywords(state: AgentState) -> dict:
@@ -43,11 +52,15 @@ def extract_keywords(state: AgentState) -> dict:
     ])
     keywords = list(set(data.get("keywords", [])))
     categories = data.get("categories", {})
+    required = data.get("required_skills", [])
+    preferred = data.get("preferred_skills", [])
 
-    logger.info("Keyword extractor: %d unique keywords in %d categories.",
-                len(keywords), len(categories))
+    logger.info("Keyword extractor: %d unique keywords in %d categories (%d required, %d preferred).",
+                len(keywords), len(categories), len(required), len(preferred))
 
     return {
         "jd_keywords": keywords,
         "keyword_categories": categories,
+        "required_keywords": required,
+        "preferred_keywords": preferred,
     }

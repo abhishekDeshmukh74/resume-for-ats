@@ -15,6 +15,7 @@ Given a resume and a set of target JD keywords, you will:
 1. Identify the resume's sections (summary, skills, each experience entry, education).
 2. Map which keywords are ALREADY present in each section.
 3. Identify which keywords are MISSING and suggest WHERE to place them.
+4. For each missing keyword, suggest the SPECIFIC section and bullet point where it fits most naturally.
 
 Return ONLY valid JSON:
 {
@@ -32,14 +33,21 @@ Return ONLY valid JSON:
   },
   "present_keywords": ["keyword1", "keyword2"],
   "missing_keywords": ["keyword3", "keyword4"],
-  "gap_analysis": "Brief analysis of what needs to change. Which keywords fit naturally into which sections. Be specific about placement."
+  "gap_analysis": "Detailed analysis with SPECIFIC placement instructions for each missing keyword. Group by section. Example: SKILLS SECTION: Add Python, Docker, Kubernetes. SUMMARY: Add 'cloud architecture' and 'microservices'. EXPERIENCE bullet 1 at Company X: Add 'CI/CD' and 'agile'. Be as specific as possible about WHERE each keyword should go.",
+  "placement_map": {
+    "skills": ["keyword3", "keyword4"],
+    "summary": ["keyword5"],
+    "experience_bullets": {"Company X bullet 1": ["keyword6"]}
+  }
 }
 
 RULES:
 - The "text" fields must be EXACT verbatim copies from the resume.
-- Be specific about which missing keywords should go into which section/bullet.
+- Be VERY specific about which missing keywords should go into which section/bullet.
+- The skills section is the highest-impact place for technical keywords — prioritise it.
 - Do NOT suggest adding keywords that don't make sense for the candidate's actual experience.
-- Prioritise high-impact keywords (job title match, core technical skills, key methodologies)."""
+- Prioritise high-impact keywords (job title match, core technical skills, key methodologies).
+- For the gap_analysis field, write actionable instructions the rewriter can follow directly."""
 
 
 def analyse_resume(state: AgentState) -> dict:
