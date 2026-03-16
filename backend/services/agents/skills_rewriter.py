@@ -31,7 +31,9 @@ comma-separated items.
 ═══ STRICT FORMAT RULES ═══
 
 1. Output MUST be {"old": "...", "new": "..."} replacement pairs.
-2. "old" must be a VERBATIM skills line from the resume.
+2. "old" must be a VERBATIM skills line — it MUST contain a colon AND at least
+   one comma (e.g. "Frontend: React, Next.js"). NEVER use a bare section header
+   like "Skills" or "Technical Skills" as "old".
 3. "new" must keep the EXACT same format: "Category: Skill1, Skill2, Skill3"
 4. ONLY append comma-separated keywords. NEVER add:
    - Sentences or phrases ("with expertise in...", "and proficiency in...")
@@ -118,7 +120,24 @@ def rewrite_skills(state: AgentState) -> dict:
     raw = data.get("replacements", [])
     raw = [r for r in raw if r.get("old") and r.get("new") and r["old"] != r["new"]]
 
-    # Programmatic safety: strip any trailing prose the LLM may have added
+    # Programmatic safety: reject replacements that aren't valid skills lines.
+    # A valid skills line must contain a colon AND at least one comma
+    # (e.g. "Frontend: React, Next.js").  Bare section headers like "Skills"
+    # or prose sentences must never reach the output.
+    def _is_valid_skills_line(old: str) -> bool:
+        stripped = old.strip()
+        return ":" in stripped and "," in stripped
+
+    rejected = [r for r in raw if not _is_valid_skills_line(r["old"])]
+    if rejected:
+        logger.debug(
+            "Skills rewriter: rejected %d non-skills-line replacements: %s",
+            len(rejected),
+            [r["old"][:60] for r in rejected],
+        )
+    raw = [r for r in raw if _is_valid_skills_line(r["old"])]
+
+    # Strip any trailing prose the LLM may have appended after the keyword list
     _TRAILING_PROSE = re.compile(
         r",?\s+(?:with|and|including|such as|plus)\s+"
         r"(?:experience|expertise|proficiency|knowledge|"
@@ -131,6 +150,11 @@ def rewrite_skills(state: AgentState) -> dict:
         if cleaned != r["new"]:
             logger.debug("Skills rewriter: stripped prose from: %r → %r", r["new"], cleaned)
             r["new"] = cleaned
+        # Final guard: if new still contains no comma it became a bare sentence — discard
+        if "," not in r["new"]:
+            logger.debug("Skills rewriter: discarding no-comma new value: %r", r["new"])
+            r["old"] = ""  # mark for removal below
+    raw = [r for r in raw if r.get("old")]
 
     logger.info("Skills rewriter: produced %d replacements.", len(raw))
     return {"raw_replacements": raw}

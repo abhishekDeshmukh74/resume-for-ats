@@ -26,7 +26,9 @@ Your ONLY job: rewrite the summary to naturally incorporate missing keywords.
 ═══ RULES ═══
 
 1. Output MUST be a SINGLE {"old": "...", "new": "..."} replacement pair.
-2. "old" must be the VERBATIM summary text from the resume.
+2. "old" must be the VERBATIM summary paragraph text — the actual prose content,
+   NOT the section header. NEVER use a bare header like "Summary", "Profile",
+   or "About Me" as "old". It must be at least one full sentence.
 3. "new" must be ±20% the length of "old".
 4. Weave keywords into natural, professional prose.
 5. Focus on BROAD keywords: role title, years of experience, core technologies,
@@ -101,6 +103,20 @@ def rewrite_summary(state: AgentState) -> dict:
 
     raw = data.get("replacements", [])
     raw = [r for r in raw if r.get("old") and r.get("new") and r["old"] != r["new"]]
+
+    # Reject replacements where "old" is just a section header (e.g. "Summary",
+    # "Profile", "About Me"). A real summary paragraph has at least 5 words.
+    def _is_real_summary(old: str) -> bool:
+        return len(old.strip().split()) >= 5
+
+    rejected = [r for r in raw if not _is_real_summary(r["old"])]
+    if rejected:
+        logger.debug(
+            "Summary rewriter: rejected %d header-only replacements: %s",
+            len(rejected),
+            [r["old"][:60] for r in rejected],
+        )
+    raw = [r for r in raw if _is_real_summary(r["old"])]
 
     logger.info("Summary rewriter: produced %d replacements.", len(raw))
     return {"raw_replacements": raw}

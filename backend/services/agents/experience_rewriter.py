@@ -8,6 +8,7 @@ metrics, numbers, and quantitative impact.
 from __future__ import annotations
 
 import logging
+import re
 
 from backend.services.agents.llm import invoke_llm_json, _sanitize_user_input
 from backend.services.agents.state import AgentState
@@ -26,7 +27,12 @@ Your ONLY job: rewrite experience bullets to incorporate missing keywords.
 ═══ RULES ═══
 
 1. Output MUST be {"old": "...", "new": "..."} replacement pairs.
-2. "old" must be a VERBATIM bullet point or group of bullets from the resume.
+2. "old" must be a VERBATIM bullet point — the actual bullet content describing
+   work done. NEVER use lines that are job headers (company name, job title,
+   or date range). A job header line contains a date range like
+   "January 2023 – Present" or "Dec 2022 – Mar 2024" — these must be skipped.
+   NEVER use bare section headers like "Experience" or "Work History" as "old".
+   Each "old" must start with an action verb or bullet marker.
 3. "new" must be ±20% the length of "old".
 4. ONE replacement per bullet point. Do NOT combine multiple bullets.
 
@@ -144,6 +150,31 @@ def rewrite_experience(state: AgentState) -> dict:
 
     raw = data.get("replacements", [])
     raw = [r for r in raw if r.get("old") and r.get("new") and r["old"] != r["new"]]
+
+    # Reject replacements where "old" is a bare section heading, job-title line,
+    # or a job header containing a date range.
+    _DATE_RANGE_RE = re.compile(
+        r"\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?"
+        r"|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?"
+        r"|Dec(?:ember)?)\s+\d{4}",
+        re.IGNORECASE,
+    )
+
+    def _is_real_bullet(old: str) -> bool:
+        stripped = old.strip().lstrip("\u2022-\u2013\u2014* ")
+        # Reject lines that contain a date (job header / tenure line)
+        if _DATE_RANGE_RE.search(old):
+            return False
+        return len(stripped.split()) >= 5
+
+    rejected = [r for r in raw if not _is_real_bullet(r["old"])]
+    if rejected:
+        logger.debug(
+            "Experience rewriter: rejected %d header/title replacements: %s",
+            len(rejected),
+            [r["old"][:60] for r in rejected],
+        )
+    raw = [r for r in raw if _is_real_bullet(r["old"])]
 
     logger.info("Experience rewriter: produced %d replacements.", len(raw))
     return {"raw_replacements": raw}
