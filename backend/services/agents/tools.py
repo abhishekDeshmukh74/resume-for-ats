@@ -1,12 +1,32 @@
-"""Deterministic scoring and analysis tools.
+"""Deterministic scoring and analysis tools (non-LLM).
 
-These are non-LLM tools used by agents for objective measurements:
-  - keyword coverage calculator
-  - embedding similarity calculator
-  - duplication detector
-  - bullet length checker
-  - ATS format checker
-  - unsupported claim checker
+This module provides objective, reproducible measurements that agents use
+alongside LLM calls.  By running deterministic checks first, we give the
+LLM concrete numbers to anchor its evaluation and avoid pure "vibe" scoring.
+
+Used by
+~~~~~~~
+* ``gap_analyzer.py``   — ``compute_keyword_coverage()`` to measure keyword
+  overlap before sending to the LLM for nuanced gap analysis.
+* ``scorer.py``         — ``compute_keyword_coverage()``, ``check_ats_format()``,
+  ``check_bullet_quality()``, ``detect_keyword_stuffing()``, and
+  ``compute_ats_score()`` to build the hybrid deterministic + LLM composite score.
+* ``skills_optimizer.py``— ``normalize_skill_names()`` to dedupe / canonicalise
+  skill names before and after LLM optimization.
+* ``truth_guard.py``    — ``check_unsupported_claims()`` to flag skills in the
+  optimized resume that don’t appear in the original.
+* ``critic.py``         — ``detect_keyword_stuffing()`` to inject stuffing
+  warnings into the critic review.
+
+Scoring formula (``compute_ats_score``)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+::
+
+    overall = (0.30 * keyword_coverage
+            + 0.25 * semantic_alignment     # from LLM
+            + 0.20 * section_quality        # from LLM
+            + 0.15 * ats_format             # from check_ats_format()
+            + 0.10 * truthfulness)          # 100 baseline, penalised by truth_guard
 """
 
 from __future__ import annotations
@@ -26,15 +46,33 @@ def compute_keyword_coverage(
     keywords: list[str],
     weights: dict[str, int] | None = None,
 ) -> dict:
-    """Count which keywords appear in *text* (case-insensitive fuzzy match).
+    """Measure which JD keywords appear in ``text`` (case-insensitive, fuzzy).
+
+    Uses two strategies:
+
+    1. **Exact substring** match (lowercased) for multi-word keywords.
+    2. **Fuzzy token** match via ``rapidfuzz.fuzz.ratio ≥ 85`` for single-word
+       variants (e.g., "TypeScript" vs "Typescript").
+
+    Called by:
+        * ``gap_analyzer.compute_gap_node``  — provides deterministic coverage
+          numbers that the LLM uses as an input signal.
+        * ``scorer.score_resume``            — produces the ``keyword_match``
+          component (weight 0.30) of the composite ATS score.
+
+    Args:
+        text:     The full resume text (or reconstructed text blob) to search.
+        keywords: List of JD keywords to look for.
+        weights:  Optional ``{keyword: int}`` importance weights (1–10 scale,
+                  from ``parsed_jd["skill_weights"]``).  When provided the
+                  return dict includes a ``weighted_score``.
 
     Returns:
-        {
-            "covered": [...],
-            "missing": [...],
-            "coverage_pct": float (0-100),
-            "weighted_score": float (0-100) if weights provided
-        }
+        dict with keys:
+            * ``covered``        — list of matched keywords
+            * ``missing``        — list of unmatched keywords
+            * ``coverage_pct``   — float 0–100 (unweighted)
+            * ``weighted_score`` — float 0–100 (only when *weights* given)
     """
     text_lower = text.lower()
     covered: list[str] = []
@@ -76,9 +114,26 @@ def compute_keyword_coverage(
 # ---------------------------------------------------------------------------
 
 def detect_keyword_stuffing(text: str, keywords: list[str], max_count: int = 3) -> list[dict]:
-    """Detect keywords that appear too many times in *text*.
+    """Flag keywords that appear too many times in ``text``.
 
-    Returns list of {"keyword": str, "count": int, "max": int}.
+    Keyword stuffing is a common problem when LLMs optimise for ATS — they
+    repeat high-weight keywords 4–6 times, which looks spammy to human
+    recruiters and some ATS systems.
+
+    Called by:
+        * ``scorer.score_resume``  — included in the score report so downstream
+          agents know about stuffing issues.
+        * ``critic.critic_node``   — injected into the LLM review prompt and
+          added as ``keyword_stuffing`` issues in the critic report.
+
+    Args:
+        text:      The resume text to scan.
+        keywords:  JD keywords to check.
+        max_count: Threshold above which a keyword is flagged (default 3).
+
+    Returns:
+        List of ``{"keyword": str, "count": int, "max": int}`` for each
+        over-represented keyword.  Empty list means no stuffing detected.
     """
     text_lower = text.lower()
     violations: list[dict] = []
@@ -108,18 +163,31 @@ _STRONG_VERB_RE = re.compile(
 
 
 def check_bullet_quality(bullets: list[str]) -> list[dict]:
-    """Evaluate individual bullet points for ATS quality.
+    """Rate individual resume bullet points for ATS quality.
 
-    Returns per-bullet analysis:
-        {
-            "bullet": str,
-            "length": int,
-            "starts_with_verb": bool,
-            "has_metric": bool,
-            "too_short": bool,
-            "too_long": bool,
-            "quality": "good" | "weak" | "bad"
-        }
+    Each bullet is evaluated on three criteria:
+
+    * **Starts with a strong action verb** — matches a curated regex of
+      ~35 strong verbs ("built", "designed", "reduced", etc.).
+    * **Contains a quantifiable metric** — numbers, percentages, user counts.
+    * **Appropriate length** — not too short (< 30 chars) or too long (> 250).
+
+    Quality grades:
+        * ``"good"``  — starts with verb AND has metric AND within length.
+        * ``"weak"``  — has verb OR has metric, but not both.
+        * ``"bad"``   — neither verb nor metric.
+
+    Called by:
+        * ``scorer.score_resume`` — the ratio of ``good`` bullets feeds into
+          the ``section_quality`` input passed to the LLM rubric scorer.
+
+    Args:
+        bullets: List of bullet-point strings from experience/projects.
+
+    Returns:
+        List of per-bullet dicts with keys: ``bullet``, ``length``,
+        ``starts_with_verb``, ``has_metric``, ``too_short``, ``too_long``,
+        ``quality``.
     """
     results: list[dict] = []
     for b in bullets:
@@ -164,15 +232,27 @@ _STANDARD_HEADINGS = {
 
 
 def check_ats_format(resume_text: str) -> dict:
-    """Check resume text for ATS-friendliness.
+    """Evaluate resume text for ATS-friendliness (structural checks).
+
+    Checks performed (each deducts from a 100-point baseline):
+
+    * **Standard headings** (−15): Fewer than 3 recognised section headings
+      (SUMMARY, EXPERIENCE, SKILLS, EDUCATION, etc.).
+    * **Table/box characters** (−10): Unicode box-drawing chars that confuse
+      ATS parsers (``│┌┐═║`` etc.).
+    * **Date formatting** (−5): Fewer than 2 recognisable date patterns.
+    * **Contact info** (−5 each): Missing email or phone number.
+
+    Called by:
+        * ``scorer.score_resume`` — the ``score`` field becomes the
+          ``ats_format`` component (weight 0.15) of the composite ATS score.
+
+    Args:
+        resume_text: Plain-text resume content.
 
     Returns:
-        {
-            "score": int (0-100),
-            "issues": [str],
-            "has_standard_headings": bool,
-            "section_order_ok": bool,
-        }
+        dict with keys: ``score`` (0–100), ``issues`` (list[str]),
+        ``has_standard_headings`` (bool), ``found_headings`` (list[str]).
     """
     issues: list[str] = []
     lines = resume_text.strip().splitlines()
@@ -234,9 +314,29 @@ def check_unsupported_claims(
     rewritten_skills: list[str],
     original_skills: list[str],
 ) -> list[dict]:
-    """Flag skills in the rewritten version not found in the original.
+    """Flag skills that appear in the optimized resume but not in the original.
 
-    Returns list of {"type": str, "value": str, "reason": str}.
+    Uses three detection strategies (in order):
+
+    1. **Text search** — lowercased substring match against the full original
+       resume text.
+    2. **Skill-list match** — exact match against the parsed original skills.
+    3. **Fuzzy fallback** — ``rapidfuzz.fuzz.ratio ≥ 85`` against original
+       skills (catches "React.js" vs "ReactJS").
+
+    Called by:
+        * ``truth_guard.truth_guard_node`` — runs this *before* the LLM depth
+          check to provide concrete evidence of unsupported skills that the LLM
+          can use (and extend) in its analysis.
+
+    Args:
+        original_text:    The full original resume text (all sections joined).
+        rewritten_skills: Flat list of skills from the optimized draft.
+        original_skills:  Flat list of skills from the parsed original resume.
+
+    Returns:
+        List of ``{"type": "unsupported_skill", "value": str, "reason": str}``
+        for each skill not traceable to the original.  Empty list = all clean.
     """
     original_lower = original_text.lower()
     original_skills_lower = {s.lower() for s in original_skills}
@@ -266,7 +366,23 @@ def check_unsupported_claims(
 # ---------------------------------------------------------------------------
 
 def normalize_skill_names(skills: list[str]) -> list[str]:
-    """Dedupe and normalize common skill name variants."""
+    """De-duplicate and canonicalise common skill name variants.
+
+    Maintains a static lookup table of ~40 common aliases (e.g., ``js`` →
+    ``JavaScript``, ``k8s`` → ``Kubernetes``).  Unknown skill names are
+    returned unchanged but de-duplicated.
+
+    Called by:
+        * ``skills_optimizer.optimize_skills_node`` — applied *before* the LLM
+          call (so it sees clean names) and again *after* (to catch any
+          remaining inconsistencies the LLM introduced).
+
+    Args:
+        skills: Raw skill names, potentially with duplicates or aliases.
+
+    Returns:
+        De-duplicated list with canonical names (order preserved).
+    """
     _CANONICAL: dict[str, str] = {
         "js": "JavaScript",
         "javascript": "JavaScript",
@@ -326,14 +442,34 @@ def compute_ats_score(
     ats_format_score: float,
     truthfulness_score: float,
 ) -> dict:
-    """Compute a weighted composite ATS score.
+    """Compute the weighted composite ATS score.
 
-    Formula:
-        0.30 * keyword_match +
-        0.25 * semantic_alignment +
-        0.20 * section_quality +
-        0.15 * ats_format +
-        0.10 * truthfulness
+    Formula::
+
+        overall = (0.30 × keyword_coverage
+                 + 0.25 × semantic_alignment
+                 + 0.20 × section_quality
+                 + 0.15 × ats_format
+                 + 0.10 × truthfulness)
+
+    All inputs are on a 0–100 scale.  The output ``overall_score`` is also
+    0–100.
+
+    Called by:
+        * ``scorer.score_resume`` — combines deterministic scores (keyword,
+          format) with LLM rubric scores (semantic, section quality) and a
+          truthfulness baseline.
+
+    Args:
+        keyword_coverage_pct:  From ``compute_keyword_coverage.weighted_score``.
+        semantic_score:        LLM-evaluated semantic alignment (0–100).
+        section_quality_score: LLM-evaluated section quality (0–100).
+        ats_format_score:      From ``check_ats_format.score``.
+        truthfulness_score:    100 at baseline; penalised by truth guard violations.
+
+    Returns:
+        dict with ``overall_score`` (float) and ``breakdown`` (dict of
+        individual dimension scores).
     """
     overall = (
         0.30 * keyword_coverage_pct

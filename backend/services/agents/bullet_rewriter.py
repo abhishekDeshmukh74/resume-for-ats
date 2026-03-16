@@ -1,15 +1,39 @@
 """Agent 5 — Bullet Rewriter Agent.
 
-Rewrites experience and project bullets so they are:
-  - ATS keyword aligned
-  - Achievement-based
-  - Concise
-  - Metric-driven (if metrics already exist)
-  - Clearer and more role-aligned
+Rewrites experience and project bullets for ATS optimisation following the
+**Action + Tech + Scope + Result** pattern.
 
-Pattern: Action + Tech + Scope + Result
+Rules (hard constraints for the LLM):
+    * NEVER invent facts, metrics, companies, or tools.
+    * NEVER add fake numbers or percentages.
+    * Preserve *all* existing metrics and numbers exactly.
+    * Use strong action verbs; avoid AI-sounding words.
+    * Integrate JD keywords *naturally* into the sentence core.
+    * Each keyword appears at MOST 2 times across all bullets.
+    * Spread keywords EVENLY — don’t stuff one bullet.
+    * Keep bullets to 1–2 lines.
+    * For each bullet, explain *why* the rewrite improves ATS alignment.
 
-Rules: keep facts intact, do not add fake numbers.
+Graph position:
+    ``optimize_skills`` → **optimize_experience** → ``merge_resume``
+
+    Also reachable via the rewrite loop: ``rewrite_router`` →
+    ``optimize_experience`` → ``merge_resume`` → ``truth_guard``.
+
+State reads:
+    ``parsed_resume``, ``parsed_jd``, ``gap_report``
+
+State writes:
+    ``optimized_experience`` — dict with keys:
+        * ``experience`` — list of dicts, each with ``company``, ``title``,
+          ``start``, ``end``, ``bullets`` (list of
+          ``{original, rewritten, explanation}``).
+        * ``projects`` — list of dicts, each with ``name``, ``bullets``
+          (same structure).
+
+Downstream consumer:
+    ``_merge_resume_node`` in ``graph.py`` extracts the ``rewritten`` field
+    from each bullet to build the ``draft_resume``.
 """
 
 from __future__ import annotations
@@ -92,7 +116,25 @@ Example better:
 
 
 def optimize_experience_node(state: ResumeGraphState) -> dict:
-    """Node: rewrite experience and project bullets for ATS optimization."""
+    """LangGraph node: rewrite experience and project bullets for ATS alignment.
+
+    Sends the current experience, projects, JD signals, and relevant gap
+    report excerpts (underrepresented keywords, reframe opportunities,
+    priority additions) to the LLM with strict rewriting rules.
+
+    The returned structure preserves the original bullet alongside the
+    rewrite and an explanation, so the merge node and truth guard can
+    verify changes.
+
+    Args:
+        state: Pipeline state; reads ``parsed_resume``, ``parsed_jd``,
+               ``gap_report``.
+
+    Returns:
+        ``{"optimized_experience": dict}`` with ``experience`` and
+        ``projects`` arrays, each containing per-bullet
+        ``{original, rewritten, explanation}``.
+    """
     parsed_resume = state.get("parsed_resume", {})
     parsed_jd = state.get("parsed_jd", {})
     gap_report = state.get("gap_report", {})

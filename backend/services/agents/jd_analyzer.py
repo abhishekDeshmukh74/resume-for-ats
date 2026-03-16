@@ -1,8 +1,36 @@
 """Agent 2 — JD Analyzer Agent.
 
-Parses the job description and extracts structured hiring signals:
-required skills, nice-to-have skills, domain keywords, seniority signals,
-ATS keywords, impact patterns, and skill weights.
+Parses the raw job description text and extracts structured hiring signals
+that all downstream agents rely on.
+
+Responsibilities:
+    * Identify the target role family (e.g., "Full Stack", "Backend").
+    * Separate must-have skills from nice-to-have skills.
+    * Extract ATS keywords, domain keywords, and impact patterns.
+    * Infer seniority level from language cues ("5+ years", "senior").
+    * Assign importance weights (1–10) to each skill based on JD emphasis.
+    * Normalise skill names for ATS searchability.
+
+Graph position:
+    ``parse_resume`` → **analyze_jd** → ``compute_gap``
+
+State reads:
+    ``raw_jd_text``
+
+State writes:
+    ``parsed_jd`` — dict with keys: ``target_role``, ``must_have_skills``,
+    ``good_to_have_skills``, ``domain_keywords``, ``responsibilities``,
+    ``seniority_signals``, ``ats_keywords``, ``impact_patterns``,
+    ``skill_weights``.
+
+Downstream consumers:
+    * ``gap_analyzer``       — compares ``parsed_jd`` against ``parsed_resume``.
+    * ``scorer``             — uses ``ats_keywords`` and ``skill_weights`` for
+      keyword coverage scoring.
+    * ``summary_optimizer``, ``skills_optimizer``, ``bullet_rewriter`` — use
+      JD signals to guide ATS-aligned rewrites.
+    * ``critic``             — uses JD context to evaluate keyword stuffing and
+      role alignment.
 """
 
 from __future__ import annotations
@@ -53,7 +81,20 @@ Given a job description, extract ALL important hiring signals and structure them
 
 
 def analyze_jd_node(state: ResumeGraphState) -> dict:
-    """Node: parse JD into structured hiring signals."""
+    """LangGraph node: extract structured hiring signals from the job description.
+
+    Sends the sanitised JD text to the LLM with a system prompt that defines
+    the exact output schema.  Logs a summary of extracted signal counts.
+
+    Args:
+        state: Pipeline state; reads ``raw_jd_text``.
+
+    Returns:
+        ``{"parsed_jd": dict}`` with keys ``target_role``,
+        ``must_have_skills``, ``good_to_have_skills``, ``domain_keywords``,
+        ``responsibilities``, ``seniority_signals``, ``ats_keywords``,
+        ``impact_patterns``, ``skill_weights``.
+    """
     jd_text = sanitize_input(state["raw_jd_text"])
 
     data = invoke_llm_json([

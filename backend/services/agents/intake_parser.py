@@ -1,8 +1,31 @@
 """Agent 1 — Intake / Parser Agent.
 
-Reads uploaded resume text and converts it into structured resume JSON.
-Normalizes messy input, splits sections, extracts bullets, detects duplicates,
-and preserves original facts exactly.
+Reads uploaded resume text (extracted from PDF or LaTeX by ``parser.py`` /
+``latex_parser.py``) and converts it into a structured JSON dict.
+
+Responsibilities:
+    * Normalise messy PDF-extracted text (spacing artefacts, merged lines).
+    * Split sections (summary, skills, experience, projects, education, certs).
+    * Extract individual bullet points.
+    * Detect and remove duplicate entries.
+    * Categorise skills into groups (languages, frontend, backend, etc.).
+    * Preserve original facts *exactly* — do NOT invent missing fields.
+
+Graph position:
+    Entry point → first node in the pipeline.
+
+State reads:
+    ``raw_resume_text``
+
+State writes:
+    ``parsed_resume`` — structured dict with keys: ``basics``, ``summary``,
+    ``skills`` (categorised dict), ``experience``, ``projects``, ``education``,
+    ``certifications``.
+
+Downstream consumers:
+    Every subsequent agent reads ``parsed_resume``.  The structure it produces
+    is the *canonical internal representation* of the resume for the entire
+    pipeline.
 """
 
 from __future__ import annotations
@@ -88,7 +111,20 @@ into a clean, structured JSON object.
 
 
 def parse_resume_node(state: ResumeGraphState) -> dict:
-    """Node: parse raw resume text into structured JSON."""
+    """LangGraph node: parse raw resume text into structured JSON.
+
+    Sends the sanitised resume text to the LLM with a system prompt that
+    defines the exact JSON schema.  Validates that at least ``basics.name``
+    was extracted.
+
+    Args:
+        state: Pipeline state; reads ``raw_resume_text``.
+
+    Returns:
+        ``{"parsed_resume": dict}`` with keys ``basics``, ``summary``,
+        ``skills``, ``experience``, ``projects``, ``education``,
+        ``certifications``.
+    """
     raw_text = sanitize_input(state["raw_resume_text"])
 
     data = invoke_llm_json([

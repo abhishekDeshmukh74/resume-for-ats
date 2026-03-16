@@ -1,12 +1,32 @@
 """Agent 6 — Summary Optimizer Agent.
 
-Creates a sharp summary section matching:
-  - Target role
-  - Years of experience
-  - Strongest matching skills
-  - Domain alignment
+Creates a sharp, ATS-optimised professional summary section that aligns
+with the target role, years of experience, strongest matching skills,
+and domain focus.
 
-Rules: no buzzword salad, no generic phrases, include top 4-6 match signals.
+Rules (hard constraints):
+    * NO buzzword salad ("results-driven professional").
+    * NO generic filler — every word conveys specific information.
+    * Include the top 4–6 strongest match signals from the JD.
+    * 2–4 sentences maximum.
+    * NEVER claim experience the candidate doesn’t have.
+    * Use the candidate’s ACTUAL years of experience.
+    * Third person, no pronouns.
+
+Graph position:
+    ``baseline_score`` → **optimize_summary** → ``optimize_skills``
+
+    Also reachable via: ``rewrite_router`` → ``optimize_summary``.
+
+State reads:
+    ``parsed_resume``, ``parsed_jd``, ``gap_report``
+
+State writes:
+    ``optimized_summary`` — plain string (the new summary text).
+
+Downstream consumer:
+    ``_merge_resume_node`` in ``graph.py`` replaces ``draft_resume["summary"]``
+    with this value.
 """
 
 from __future__ import annotations
@@ -61,7 +81,22 @@ engineering teams."
 
 
 def optimize_summary_node(state: ResumeGraphState) -> dict:
-    """Node: write an ATS-optimized summary section."""
+    """LangGraph node: generate an ATS-optimised professional summary.
+
+    Sends the parsed resume, JD signals, and gap report to the LLM with
+    strict formatting rules.  The LLM returns the summary text along with
+    the signals it chose and an explanation for its choices.
+
+    Only the ``summary`` string is written to state; the explanation and
+    signals are logged for debugging.
+
+    Args:
+        state: Pipeline state; reads ``parsed_resume``, ``parsed_jd``,
+               ``gap_report``.
+
+    Returns:
+        ``{"optimized_summary": str}`` — the new summary paragraph.
+    """
     parsed_resume = state.get("parsed_resume", {})
     parsed_jd = state.get("parsed_jd", {})
     gap_report = state.get("gap_report", {})

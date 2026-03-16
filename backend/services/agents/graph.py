@@ -89,7 +89,25 @@ _AGENT_INPUT_KEYS: dict[str, list[str]] = {
 
 
 def _tracked(agent_name: str, agent_fn):
-    """Wrap an agent function to persist its I/O to MongoDB."""
+    """Wrap an agent node function to persist its I/O to MongoDB.
+
+    Creates a closure that:
+        1. Extracts the relevant input keys from state (defined in
+           ``_AGENT_INPUT_KEYS``) for a compact summary.
+        2. Calls the actual agent function and times it.
+        3. Persists ``(run_id, agent_name, duration_ms, input_summary, result)``
+           to MongoDB via ``save_agent_step()``.
+
+    The run ID is retrieved from the ``_current_run_id`` context var, which is
+    set in ``generate_resume()`` at the start of each pipeline invocation.
+
+    Args:
+        agent_name: Human-readable name used as the MongoDB document key.
+        agent_fn:   The actual node function ``(state) -> dict``.
+
+    Returns:
+        A wrapper function with the same signature as ``agent_fn``.
+    """
     input_keys = _AGENT_INPUT_KEYS.get(agent_name, [])
 
     def wrapper(state: ResumeGraphState) -> dict:
@@ -109,7 +127,30 @@ def _tracked(agent_name: str, agent_fn):
 # ── Merge node — combines optimized sections into a draft resume ──────────
 
 def _merge_resume_node(state: ResumeGraphState) -> dict:
-    """Merge optimized summary, skills, and experience into a complete draft."""
+    """Merge optimised summary, skills, and experience into a complete draft.
+
+    Takes the original ``parsed_resume`` as a base and overlays:
+        * ``optimized_summary`` → replaces ``draft["summary"]``
+        * ``optimized_skills``  → replaces ``draft["skills"]``
+        * ``optimized_experience.experience`` → rebuilds ``draft["experience"]``
+          by extracting the ``rewritten`` field from each bullet dict.
+        * ``optimized_experience.projects`` → rebuilds ``draft["projects"]``
+          similarly.
+
+    The original ``basics``, ``education``, and ``certifications`` are carried
+    through unchanged.
+
+    This node is essential because the three optimizers run independently and
+    produce partial outputs — this node combines them into a single coherent
+    document for subsequent truth checking and scoring.
+
+    Args:
+        state: Pipeline state; reads ``parsed_resume``, ``optimized_summary``,
+               ``optimized_skills``, ``optimized_experience``.
+
+    Returns:
+        ``{"draft_resume": dict}`` — the complete merged resume.
+    """
     parsed = state.get("parsed_resume", {})
     draft = copy.deepcopy(parsed)
 
@@ -171,10 +212,21 @@ def _merge_resume_node(state: ResumeGraphState) -> dict:
 # ── Rewrite router — targeted re-optimization based on critic feedback ────
 
 def _rewrite_router_node(state: ResumeGraphState) -> dict:
-    """Route critic failures back to specific optimizers.
+    """Increment the revision counter and prepare for targeted re-optimisation.
 
-    Increments revision_count and applies critic instructions to the
-    draft resume for the next optimization pass.
+    This node is reached when either the truth guard or critic has failed.
+    It simply bumps ``revision_count``; the actual routing decision (which
+    optimizer to call) is handled by the ``_after_rewrite_router`` conditional
+    edge function.
+
+    The revision count is checked by ``_after_critic`` and ``_after_truth_guard``
+    to enforce the ``_MAX_REVISIONS`` (2) limit, preventing infinite loops.
+
+    Args:
+        state: Pipeline state; reads ``revision_count``.
+
+    Returns:
+        ``{"revision_count": int}`` — incremented by 1.
     """
     revision_count = state.get("revision_count", 0) + 1
     logger.info("Rewrite router: starting revision %d.", revision_count)
@@ -187,7 +239,18 @@ _MAX_REVISIONS = 2
 
 
 def _after_critic(state: ResumeGraphState) -> str:
-    """Decide whether to revise or proceed to final scoring."""
+    """Conditional edge after the critic node.
+
+    Decision logic:
+        * If ``critic_report.passed == False`` AND ``revision_count`` is below
+          ``_MAX_REVISIONS`` (2): route to ``rewrite_router`` for targeted
+          re-optimisation.
+        * Otherwise: proceed to ``final_score`` (the quality is acceptable or
+          we’ve exhausted revision attempts).
+
+    Returns:
+        ``"rewrite_router"`` or ``"final_score"``.
+    """
     critic = state.get("critic_report", {})
     revision_count = state.get("revision_count", 0)
 
@@ -199,7 +262,17 @@ def _after_critic(state: ResumeGraphState) -> str:
 
 
 def _after_truth_guard(state: ResumeGraphState) -> str:
-    """Route based on truth guard results."""
+    """Conditional edge after the truth guard node.
+
+    Decision logic:
+        * If ``truth_report.supported == False`` AND ``revision_count`` is
+          below ``_MAX_REVISIONS``: route to ``rewrite_router`` to fix
+          truthfulness violations.
+        * Otherwise: proceed to ``critic`` for quality review.
+
+    Returns:
+        ``"rewrite_router"`` or ``"critic"``.
+    """
     truth = state.get("truth_report", {})
     revision_count = state.get("revision_count", 0)
 
@@ -210,7 +283,18 @@ def _after_truth_guard(state: ResumeGraphState) -> str:
 
 
 def _after_rewrite_router(state: ResumeGraphState) -> str:
-    """Route to specific optimizer based on critic instructions."""
+    """Conditional edge after the rewrite router — pick which optimizer to run.
+
+    Reads ``critic_report.revision_instructions`` to determine which
+    section(s) need revision.  If multiple sections need work, routes to
+    the highest-impact one first (experience > summary > skills).
+
+    Falls back to ``optimize_experience`` if no specific instructions exist.
+
+    Returns:
+        ``"optimize_experience"``, ``"optimize_summary"``, or
+        ``"optimize_skills"``.
+    """
     critic = state.get("critic_report", {})
     instructions = critic.get("revision_instructions", {})
 
@@ -219,7 +303,7 @@ def _after_rewrite_router(state: ResumeGraphState) -> str:
     needs_skills = instructions.get("skills") is not None
     needs_experience = instructions.get("experience") is not None
 
-    # Route to the most impactful agent  
+    # Route to the most impactful agent
     # If multiple need revision, go to experience first (highest impact)
     if needs_experience:
         return "optimize_experience"
@@ -320,9 +404,41 @@ def generate_resume(
     resume_file_b64: str = "",
     resume_file_type: str = "pdf",
 ) -> tuple[ResumeData, str]:
-    """Run the full multi-agent pipeline.
+    """Run the full 13-node multi-agent pipeline.
 
-    Returns (ResumeData, compiled_pdf_b64).
+    This is the **public API** of the agents package, re-exported by
+    ``__init__.py`` and called by the ``/api/generate-resume`` endpoint.
+
+    Pipeline flow::
+
+        parse_resume → analyze_jd → compute_gap → baseline_score
+        → optimize_summary → optimize_skills → optimize_experience
+        → merge_resume → truth_guard → [critic] → [final_score]
+        → export → compile_pdf → END
+
+    The truth guard and critic nodes can route back to targeted optimizers
+    for up to 2 revision cycles.
+
+    Side effects:
+        * Creates a MongoDB pipeline run on entry.
+        * Each agent’s I/O is logged to MongoDB for the ``/info`` UI.
+        * Pipeline run is completed/failed on exit.
+
+    Args:
+        resume_text:     Plain text extracted from the uploaded resume.
+        jd_text:         Raw job description text.
+        resume_file_b64: Base64-encoded original resume file (PDF or .tex).
+        resume_file_type: ``"pdf"`` or ``"tex"``.
+
+    Returns:
+        Tuple of ``(ResumeData, compiled_pdf_b64)`` where ``ResumeData``
+        contains the structured resume fields and ATS scores, and
+        ``compiled_pdf_b64`` is the base64-encoded rewritten PDF.
+
+    Raises:
+        RuntimeError: If the LLM fails after all retries.
+        Exception: Any unhandled error during pipeline execution (logged
+                   to MongoDB before re-raising).
     """
     logger.info("Starting LangGraph multi-agent pipeline (13 nodes).")
 

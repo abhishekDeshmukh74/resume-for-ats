@@ -1,10 +1,45 @@
 """Agent 3 — Resume Truth Guard Agent.
 
-The most important safety agent. Checks whether rewritten content is
-supported by the source resume text.
+The most important safety agent in the pipeline.  Runs *after* the merge
+node combines all optimised sections into a draft resume, and *before* the
+critic reviews it.
 
-Rejects: invented tools, fake metrics, fake ownership claims,
-fake domain experience, fake titles.
+Purpose:
+    Verify that every claim in the optimised draft is supported by the
+    original source resume.  Any invented content is flagged as a violation.
+
+Two-pass verification:
+    1. **Deterministic skill check** — ``check_unsupported_claims()`` from
+       ``tools.py`` flags skills present in the draft but absent from the
+       original (using exact match + fuzzy fallback).
+    2. **LLM deep check** — the LLM examines the full draft against the
+       original for: invented tools/technologies, fake metrics, inflated
+       ownership claims, fake domain experience, wrong titles/dates.
+    3. Results are merged: deterministic violations not already caught by
+       the LLM are appended.
+
+Severity classification:
+    * ``high``   — invented skill, fake metric, wrong title → blocks pipeline.
+    * ``medium`` — borderline ownership claim, stretched phrasing.
+    * ``low``    — minor wording that is technically supportable.
+
+Conditional routing:
+    If ``truth_report.supported == False`` (any high-severity violation) AND
+    ``revision_count < max_revisions``, the graph routes to ``rewrite_router``
+    instead of the critic, triggering a targeted re-optimisation.
+
+Graph position:
+    ``merge_resume`` → **truth_guard** → conditional(
+        pass  → ``critic``,
+        fail  → ``rewrite_router``
+    )
+
+State reads:
+    ``parsed_resume``, ``draft_resume``
+
+State writes:
+    ``truth_report`` — dict with keys: ``supported`` (bool), ``violations``
+    (list), ``warnings`` (list), ``summary`` (str).
 """
 
 from __future__ import annotations
@@ -65,7 +100,26 @@ the original resume.
 
 
 def truth_guard_node(state: ResumeGraphState) -> dict:
-    """Node: verify optimized content against original resume."""
+    """LangGraph node: verify optimised content against the original resume.
+
+    Workflow:
+        1. Flatten original and draft skills into plain lists.
+        2. Build a full-text blob from all original resume sections.
+        3. Run ``check_unsupported_claims()`` for deterministic skill
+           violation detection.
+        4. Send both the original and draft JSON to the LLM with the
+           deterministic violations as additional evidence.
+        5. Merge violations: de-duplicate by ``value`` (lowered), then set
+           ``supported = False`` if any ``severity == "high"`` violation
+           exists.
+
+    Args:
+        state: Pipeline state; reads ``parsed_resume``, ``draft_resume``.
+
+    Returns:
+        ``{"truth_report": dict}`` with ``supported``, ``violations``,
+        ``warnings``, ``summary``.
+    """
     parsed_resume = state.get("parsed_resume", {})
     draft = state.get("draft_resume", {})
 

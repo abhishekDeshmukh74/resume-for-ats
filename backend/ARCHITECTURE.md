@@ -2,7 +2,7 @@
 
 ## Overview
 
-FastAPI backend for the pass-ats resume tailor. Receives a PDF or LaTeX resume and job description, runs a **LangGraph multi-agent pipeline** (8 sequential AI agents) to rewrite resume content for ATS optimisation, and returns a modified PDF preserving the original layout.
+FastAPI backend for the pass-ats resume tailor. Receives a PDF or LaTeX resume and job description, runs a **LangGraph 13-node multi-agent pipeline** (10 AI agents + 3 internal nodes) to rewrite resume content for ATS optimisation, and returns a modified PDF preserving the original layout.
 
 ## Directory Structure
 
@@ -24,16 +24,22 @@ backend/
     ├── db.py             # MongoDB persistence for pipeline run tracking
     └── agents/           # LangGraph multi-agent pipeline
         ├── __init__.py           # Re-exports generate_resume()
-        ├── state.py              # AgentState TypedDict (shared pipeline state)
-        ├── llm.py                # Multi-provider LLM (Groq/Gemini) + parse_llm_json()
-        ├── keyword_extractor.py  # Agent 1: Extract JD keywords
-        ├── resume_analyser.py    # Agent 2: Section analysis + gap identification
-        ├── scorer.py             # Agents 3 & 6: LLM-based ATS scoring (before + after)
-        ├── resume_rewriter.py    # Agent 4: Generate old→new replacements (all sections)
-        ├── qa_agent.py           # Agent 5: LLM-based replacement validation
-        ├── data_extractor.py     # Agent 7: Extract structured resume data
-        ├── pdf_compiler.py       # Agent 8: Apply replacements + compile PDF
-        └── graph.py              # StateGraph wiring + public generate_resume()
+        ├── state.py              # ResumeGraphState TypedDict (shared pipeline state)
+        ├── llm.py                # Multi-provider LLM (Groq/Gemini) + JSON parsing + sanitisation
+        ├── tools.py              # Deterministic scoring utilities (no LLM)
+        ├── intake_parser.py      # Agent 1: Parse resume into structured JSON
+        ├── jd_analyzer.py        # Agent 2: Extract JD signals and ATS keywords
+        ├── gap_analyzer.py       # Agent 3: Resume vs JD gap analysis
+        ├── bullet_rewriter.py    # Agent 5: Rewrite experience bullets (Action+Tech+Scope+Result)
+        ├── summary_optimizer.py  # Agent 6: Generate ATS-optimized summary
+        ├── skills_optimizer.py   # Agent 7: Normalise and align skills
+        ├── truth_guard.py        # Agent 8: Truthfulness verification (safety)
+        ├── scorer.py             # Agents 4 & 11: Hybrid ATS scoring (baseline + final)
+        ├── critic.py             # Agent 9: Quality gate with revision routing
+        ├── formatter.py          # Agent 10: Multi-format export + replacement generation
+        ├── pdf_compiler.py       # Agent 11: Apply replacements + compile PDF
+        ├── graph.py              # 13-node StateGraph wiring + public generate_resume()
+        └── AGENTS.md             # Detailed pipeline documentation
 ```
 
 ## Request Flow (Generate)
@@ -46,15 +52,20 @@ Frontend                    Backend
    │    jd_text,              │
    │    resume_file_b64 }     │
    │                          ├─ agents.generate_resume()
-   │                          │   → LangGraph pipeline (8 agents):
-   │                          │     1. extract_keywords  → JD keywords
-   │                          │     2. analyse_resume    → gap analysis
-   │                          │     3. score_before      → baseline ATS score
-   │                          │     4. rewrite_resume    → raw replacements
-   │                          │     5. qa_review         → validated replacements
-   │                          │     6. score_after       → final ATS score
-   │                          │     7. extract_data      → structured data
-   │                          │     8. compile_pdf       → apply replacements + produce PDF
+   │                          │   → LangGraph pipeline (13 nodes):
+   │                          │     1.  parse_resume      → structured resume JSON
+   │                          │     2.  analyze_jd        → JD signals & keywords
+   │                          │     3.  compute_gap       → gap report
+   │                          │     4.  baseline_score    → pre-optimisation ATS score
+   │                          │     5.  optimize_summary  → ATS summary
+   │                          │     6.  optimize_skills   → normalised skills
+   │                          │     7.  optimize_experience → rewritten bullets
+   │                          │     8.  merge_resume      → combined draft
+   │                          │     9.  truth_guard       → truthfulness check
+   │                          │    10.  critic            → quality gate
+   │                          │    11.  final_score       → post-optimisation ATS score
+   │                          │    12.  export            → text + markdown + replacements
+   │                          │    13.  compile_pdf       → rewritten PDF
    │                          │   → (ResumeData, compiled_pdf_b64)
    │                          │
    │◄─ { resume, b64_pdf } ──┤
@@ -62,20 +73,35 @@ Frontend                    Backend
 
 ## LangGraph Pipeline
 
-The AI logic is split into 8 sequential agents using LangGraph's `StateGraph`:
+The AI logic is split into 13 nodes using LangGraph's `StateGraph`, with conditional revision loops (max 2 revisions):
 
-| # | Agent | Node Name | Purpose |
-|---|-------|-----------|---------|
-| 1 | Keyword Extractor | `extract_keywords` | Extract 30–60 JD keywords, categorised |
-| 2 | Resume Analyser | `analyse_resume` | Map resume sections, find keyword gaps |
-| 3 | Pre-Rewrite Scorer | `score_before` | LLM-based ATS score before rewriting |
-| 4 | Resume Rewriter | `rewrite_resume` | Generate old→new replacements (all sections) |
-| 5 | QA Agent | `qa_review` | LLM-based replacement validation |
-| 6 | Post-Rewrite Scorer | `score_after` | LLM-based ATS score after rewriting |
-| 7 | Data Extractor | `extract_data` | Extract structured fields (name, skills, etc.) |
-| 8 | PDF Compiler | `compile_pdf` | Apply replacements to original file, produce PDF |
+| # | Agent | Node Name | File | Purpose |
+|---|-------|-----------|------|---------|
+| 1 | Intake Parser | `parse_resume` | `intake_parser.py` | Extract structured JSON from raw resume |
+| 2 | JD Analyzer | `analyze_jd` | `jd_analyzer.py` | Extract JD signals, keywords, requirements |
+| 3 | Gap Analyzer | `compute_gap` | `gap_analyzer.py` | Resume vs JD gap analysis |
+| 4 | Baseline Scorer | `baseline_score` | `scorer.py` | Hybrid ATS score before optimisation |
+| 5 | Summary Optimizer | `optimize_summary` | `summary_optimizer.py` | Generate 3–4 sentence ATS summary |
+| 6 | Skills Optimizer | `optimize_skills` | `skills_optimizer.py` | Normalise and align skills list |
+| 7 | Bullet Rewriter | `optimize_experience` | `bullet_rewriter.py` | Rewrite bullets (Action+Tech+Scope+Result) |
+| 8 | — | `merge_resume` | `graph.py` | Combine optimized sections into draft |
+| 9 | Truth Guard | `truth_guard` | `truth_guard.py` | Verify claims against original resume |
+| 10 | Critic | `critic` | `critic.py` | Quality gate — route to revision or proceed |
+| — | — | `rewrite_router` | `graph.py` | Route revision to specific optimizer |
+| 11 | Final Scorer | `final_score` | `scorer.py` | Hybrid ATS score after optimisation |
+| 12 | Formatter | `export` | `formatter.py` | Text + markdown + old→new replacements |
+| 13 | PDF Compiler | `compile_pdf` | `pdf_compiler.py` | Apply replacements to original file |
 
-All agents share an `AgentState` TypedDict. See `backend/services/agents/AGENTS.md` for details.
+All agents share a `ResumeGraphState` TypedDict. See `backend/services/agents/AGENTS.md` for detailed agent documentation.
+
+## Scoring Formula
+
+ATS score = weighted composite of deterministic + LLM sub-scores:
+
+```
+0.30 × keyword_coverage  +  0.25 × semantic_score  +  0.20 × section_quality
++  0.15 × ats_format  +  0.10 × truthfulness  −  (5 × stuffed_keyword_count)
+```
 
 ## Pipeline Run Tracking
 
@@ -106,14 +132,13 @@ Every pipeline execution is tracked in MongoDB (best-effort — failures never b
 The most fragile part of the pipeline is matching AI-generated `old` strings against PDF/LaTeX text:
 
 ### PDF Flow
-1. **`parser.py`** extracts text using `page.get_text("text")` with normalisation (spacing artefact fixes).
-2. **`agents/rewriter_agent.py`** (Agent 4) returns `old` strings that should be verbatim substrings.
-3. **`agents/qa_agent.py`** (Agent 5) validates that each `old` string exists in the original resume text.
-4. **`rewriter.py`** uses `page.search_for()` to locate `old` text in the PDF, then redacts and re-inserts.
+1. **`parser.py`** extracts text using `page.get_text("text")` with normalisation.
+2. **Formatter** (`formatter.py`) generates `old` strings that should be verbatim substrings.
+3. **`rewriter.py`** uses `page.search_for()` to locate `old` text in the PDF, then redacts and re-inserts.
 
 ### LaTeX Flow
 1. **`latex_parser.py`** strips LaTeX commands to produce plain text.
-2. Agents 4 & 5 work identically on the plain text.
+2. Agents work on the plain text.
 3. **`latex_rewriter.py`** applies replacements to the `.tex` source (with flexible pattern matching for line-wrapping and LaTeX escapes), then compiles to PDF via xelatex.
 
 ## Environment Variables
@@ -121,6 +146,7 @@ The most fragile part of the pipeline is matching AI-generated `old` strings aga
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `GROQ_API_KEY` | Yes* | Groq API key for AI calls |
+| `GROQ_API_KEYS` | No | Comma-separated Groq keys for failover |
 | `GEMINI_API_KEY` | Yes* | Google Gemini API key for AI calls |
 | `LLM_PROVIDER` | No | `"groq"` (default) or `"gemini"` |
 | `GROQ_MODEL` | No | Groq model name (default: `llama-3.3-70b-versatile`) |

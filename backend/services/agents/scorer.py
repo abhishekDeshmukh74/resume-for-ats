@@ -1,12 +1,58 @@
-"""Agent 8 — ATS Scoring Agent.
+"""Agent 8 — ATS Scoring Agent (hybrid deterministic + LLM).
 
-Hybrid scorer that combines:
-  1. Deterministic keyword coverage (exact match)
-  2. LLM rubric evaluation (semantic match, quality, alignment)
-  3. ATS format checker (structural)
-  4. Truthfulness score
+This agent is called twice:
+    1. **Baseline score** (``baseline_score_node``) — scores the *original*
+       parsed resume before any optimisation.
+    2. **Final score** (``final_score_node``) — scores the *optimised* draft
+       after all changes and truth verification.
 
-Scores resume on multiple dimensions, not a single LLM vibe-check.
+Scoring approach (hybrid):
+    Pure LLM scoring is unreliable because LLMs tend to produce optimistic
+    vibe-checks.  Instead, the score is composed from:
+
+    * **Deterministic keyword coverage** (``compute_keyword_coverage``) —
+      exact + fuzzy match against JD keywords, optionally weighted.
+    * **Deterministic format check** (``check_ats_format``) — heading
+      presence, box characters, date formatting, contact info.
+    * **Deterministic bullet quality** (``check_bullet_quality``) — strong
+      verb usage, metric presence, length checks.
+    * **Deterministic stuffing check** (``detect_keyword_stuffing``) —
+      flagged in the report for downstream agents.
+    * **LLM semantic score** — how well the resume’s narrative aligns with
+      the JD beyond keyword presence.
+    * **LLM section quality** — clarity, impact, and alignment of each
+      section.
+
+    Composite formula (``compute_ats_score``)::
+
+        overall = (0.30 × keyword_coverage
+                 + 0.25 × semantic_alignment
+                 + 0.20 × section_quality
+                 + 0.15 × ats_format
+                 + 0.10 × truthfulness)
+
+    Truthfulness starts at 100 and is penalised in the final score based on
+    ``truth_report.violations`` (5 points per high-severity violation,
+    capped at 20).
+
+Graph position (baseline):
+    ``compute_gap`` → **baseline_score** → ``optimize_summary``
+
+Graph position (final):
+    ``critic`` [passed] → **final_score** → ``export``
+
+State reads (baseline):
+    ``parsed_resume``, ``parsed_jd``
+
+State reads (final):
+    ``draft_resume``, ``parsed_jd``, ``truth_report``
+
+State writes:
+    ``baseline_score`` or ``final_score`` — dict with ``overall_score``,
+    ``breakdown``, ``keyword_coverage``, ``format_check``, ``bullet_quality``,
+    ``keyword_stuffing``, ``semantic_score``, ``section_quality_score``,
+    ``role_alignment_score``, ``weak_sections``, ``strong_sections``,
+    ``recommendations``, ``missing_high_weight_terms``.
 """
 
 from __future__ import annotations
@@ -62,7 +108,19 @@ Score the resume on these dimensions (0-100 each):
 
 
 def _build_resume_text(parsed_resume: dict) -> str:
-    """Reconstruct readable text from parsed resume structure."""
+    """Reconstruct human-readable text from a parsed resume dict.
+
+    Used to produce a text blob that the deterministic tools and the LLM
+    scorer can evaluate.  Includes name, summary, skills (categorised),
+    experience bullets, project bullets, and education.
+
+    Args:
+        parsed_resume: Structured resume dict (from ``intake_parser`` or
+                       ``draft_resume`` after merging).
+
+    Returns:
+        Multi-line string suitable for keyword matching and LLM evaluation.
+    """
     parts: list[str] = []
     basics = parsed_resume.get("basics", {})
     if basics.get("name"):
@@ -94,7 +152,14 @@ def _build_resume_text(parsed_resume: dict) -> str:
 
 
 def _collect_bullets(parsed_resume: dict) -> list[str]:
-    """Collect all bullet points from experience and projects."""
+    """Extract all bullet points from experience and projects sections.
+
+    Args:
+        parsed_resume: Structured resume dict.
+
+    Returns:
+        Flat list of bullet strings for quality analysis.
+    """
     bullets: list[str] = []
     for exp in parsed_resume.get("experience", []):
         bullets.extend(exp.get("bullets", []))
@@ -104,7 +169,26 @@ def _collect_bullets(parsed_resume: dict) -> list[str]:
 
 
 def score_resume(parsed_resume: dict, parsed_jd: dict, is_baseline: bool = False) -> dict:
-    """Score a resume against JD using hybrid deterministic + LLM approach."""
+    """Score a resume against a JD using the hybrid deterministic + LLM approach.
+
+    This is the shared scoring function called by both ``baseline_score_node``
+    and ``final_score_node``.  It runs all deterministic tools first, then
+    passes their results to the LLM for semantic and quality evaluation,
+    and finally computes the weighted composite score.
+
+    Args:
+        parsed_resume: Structured resume dict to score.
+        parsed_jd:     Structured JD analysis dict.
+        is_baseline:   If ``True``, labels log output as "Baseline";
+                       otherwise "Final".
+
+    Returns:
+        Comprehensive score dict with ``overall_score``, ``breakdown``,
+        ``keyword_coverage``, ``format_check``, ``bullet_quality``,
+        ``keyword_stuffing``, ``semantic_score``, ``section_quality_score``,
+        ``role_alignment_score``, ``weak_sections``, ``strong_sections``,
+        ``recommendations``, ``missing_high_weight_terms``.
+    """
     resume_text = _build_resume_text(parsed_resume)
 
     # ─── Deterministic Scoring ────────────────────────────────────────
@@ -187,7 +271,22 @@ def score_resume(parsed_resume: dict, parsed_jd: dict, is_baseline: bool = False
 
 
 def baseline_score_node(state: ResumeGraphState) -> dict:
-    """Node: score the original resume BEFORE optimization."""
+    """LangGraph node: score the *original* resume BEFORE optimisation.
+
+    Reads the raw parsed resume (not yet optimised) and the JD analysis,
+    then runs ``score_resume(is_baseline=True)``.
+
+    The baseline score is:
+        * Displayed to the user as the "before" score.
+        * Available to the critic agent as context for evaluating improvement.
+        * Stored in the pipeline run for analytics.
+
+    Args:
+        state: Pipeline state; reads ``parsed_resume``, ``parsed_jd``.
+
+    Returns:
+        ``{"baseline_score": dict}`` with the full score breakdown.
+    """
     parsed_resume = state.get("parsed_resume", {})
     parsed_jd = state.get("parsed_jd", {})
 
@@ -196,7 +295,25 @@ def baseline_score_node(state: ResumeGraphState) -> dict:
 
 
 def final_score_node(state: ResumeGraphState) -> dict:
-    """Node: score the optimized resume AFTER all changes."""
+    """LangGraph node: score the *optimised* resume AFTER all changes.
+
+    Reads the merged draft resume and applies ``score_resume(is_baseline=False)``.
+    Additionally applies a truthfulness penalty based on the truth guard report:
+    −5 points per high-severity violation (capped at −20).
+
+    The final score is:
+        * Displayed to the user as the "after" score.
+        * Returned in the API response as ``ats_score``.
+        * Stored in the pipeline run for analytics.
+
+    Args:
+        state: Pipeline state; reads ``draft_resume``, ``parsed_jd``,
+               ``truth_report``.
+
+    Returns:
+        ``{"final_score": dict}`` with the full score breakdown, plus
+        ``truth_penalty`` if any violations were found.
+    """
     draft = state.get("draft_resume", {})
     parsed_jd = state.get("parsed_jd", {})
 

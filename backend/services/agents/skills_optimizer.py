@@ -1,12 +1,39 @@
 """Agent 7 — Skills Section Optimizer Agent.
 
-ATS often parses the skills section heavily. This agent:
-  - Normalizes skill naming
-  - Dedupes variants
-  - Aligns terminology with JD
-  - Organizes into meaningful groups
+ATS systems parse the skills section heavily, so this agent ensures it is
+clean, normalised, and aligned with JD terminology.
 
-Rules: only include proven skills, normalize for ATS, reflect JD wording.
+Responsibilities:
+    * Normalise skill naming for ATS searchability (e.g., "JS" → "JavaScript").
+    * De-duplicate variants (don’t list both "JavaScript" and "JS").
+    * Align terminology with JD wording (use "TypeScript" if JD says so,
+      even if the resume originally said "TS").
+    * Organise into meaningful, ATS-parseable groups.
+    * Order skills within each group by relevance to the JD.
+    * Do NOT add skills the candidate doesn’t actually have.
+
+Two-pass processing:
+    1. **Pre-normalisation** — ``normalize_skill_names()`` from ``tools.py``
+       applies a deterministic alias lookup + dedup.
+    2. **LLM pass** — the LLM reorganises, reorders, and aligns with JD
+       terminology while respecting the ``cannot_claim`` list from gap analysis.
+    3. **Post-normalisation** — ``normalize_skill_names()`` applied again to
+       each category to catch any inconsistencies the LLM introduced.
+
+Graph position:
+    ``optimize_summary`` → **optimize_skills** → ``optimize_experience``
+
+    Also reachable via: ``rewrite_router`` → ``optimize_skills``.
+
+State reads:
+    ``parsed_resume``, ``parsed_jd``, ``gap_report``
+
+State writes:
+    ``optimized_skills`` — dict of ``{category: [skill_name, ...]}``.
+
+Downstream consumer:
+    ``_merge_resume_node`` in ``graph.py`` replaces ``draft_resume["skills"]``
+    with this value.
 """
 
 from __future__ import annotations
@@ -58,7 +85,25 @@ Optimize the skills section for maximum ATS parsability.
 
 
 def optimize_skills_node(state: ResumeGraphState) -> dict:
-    """Node: optimize skills section for ATS alignment."""
+    """LangGraph node: optimise the skills section for ATS alignment.
+
+    Workflow:
+        1. Flatten all current skills from the parsed resume.
+        2. Apply ``normalize_skill_names()`` (deterministic dedup + alias
+           resolution).
+        3. Send normalised skills, original structure, JD signals, and gap
+           report to the LLM for reorganisation.
+        4. Apply ``normalize_skill_names()`` again per category on the LLM
+           output to catch any remaining inconsistencies.
+
+    Args:
+        state: Pipeline state; reads ``parsed_resume``, ``parsed_jd``,
+               ``gap_report``.
+
+    Returns:
+        ``{"optimized_skills": dict}`` — categorised skill dict
+        (e.g., ``{"languages": [...], "frontend": [...], ...}``).
+    """
     parsed_resume = state.get("parsed_resume", {})
     parsed_jd = state.get("parsed_jd", {})
     gap_report = state.get("gap_report", {})

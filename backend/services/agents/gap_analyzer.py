@@ -1,12 +1,43 @@
 """Agent 4 — Gap Analysis Agent.
 
-Compares parsed resume against parsed JD to identify:
-  - Keywords already covered
-  - Keywords that exist but are under-expressed
-  - Keywords that are truly missing and cannot be claimed
-  - Reframe opportunities (truthful rephrasing)
+Compares the parsed resume against the parsed JD to build a detailed gap
+report.  This report drives all three content optimizers (summary, skills,
+bullets) by telling them *what* to prioritise.
 
-This agent is brutally honest — not everything missing should be forced in.
+Two-pass analysis:
+    1. **Deterministic pass** — ``compute_keyword_coverage()`` from ``tools.py``
+       gives an objective covered/missing list.
+    2. **LLM pass** — nuanced analysis that distinguishes:
+       - Keywords that are *covered* (no action needed).
+       - Keywords that *exist but are under-expressed* (need more prominence).
+       - Keywords that are *truly missing and cannot be claimed* (honest gap).
+       - *Reframe opportunities* (existing experience that can be rephrased
+         to match JD language without lying).
+       - *Priority additions* (where exactly to inject underrepresented terms).
+
+Design principle:
+    This agent is **brutally honest**.  Not everything missing should be forced
+    in.  If a skill is genuinely absent, it goes into ``cannot_claim`` and the
+    optimizers are explicitly told NOT to add it.
+
+Graph position:
+    ``analyze_jd`` → **compute_gap** → ``baseline_score``
+
+State reads:
+    ``parsed_resume``, ``parsed_jd``
+
+State writes:
+    ``gap_report`` — dict with keys: ``covered_keywords``,
+    ``underrepresented_keywords``, ``missing_keywords``, ``cannot_claim``,
+    ``reframe_opportunities``, ``cover_letter_suggestions``,
+    ``priority_additions``, ``deterministic_coverage``.
+
+Downstream consumers:
+    * ``summary_optimizer``  — uses covered/underrepresented to write the
+      summary and pick which signals to highlight.
+    * ``skills_optimizer``   — uses ``cannot_claim`` to know what NOT to add.
+    * ``bullet_rewriter``    — uses ``reframe_opportunities`` and
+      ``priority_additions`` to guide bullet rewrites.
 """
 
 from __future__ import annotations
@@ -65,7 +96,26 @@ Your job is to compare them brutally honestly.
 
 
 def compute_gap_node(state: ResumeGraphState) -> dict:
-    """Node: compare parsed resume against parsed JD for gaps."""
+    """LangGraph node: compare parsed resume against parsed JD for gaps.
+
+    Workflow:
+        1. Collect all JD keywords (must-have + good-to-have + ATS keywords),
+           de-duplicated.
+        2. Reconstruct a text blob from the parsed resume (summary + skills +
+           all experience/project bullets and stacks).
+        3. Run ``compute_keyword_coverage()`` for deterministic coverage stats.
+        4. Send both parsed structures *and* the deterministic coverage to the
+           LLM for a nuanced, context-aware gap analysis.
+        5. Merge the deterministic coverage into the LLM’s output under the
+           ``deterministic_coverage`` key.
+
+    Args:
+        state: Pipeline state; reads ``parsed_resume``, ``parsed_jd``.
+
+    Returns:
+        ``{"gap_report": dict}`` combining LLM analysis with deterministic
+        keyword coverage metrics.
+    """
     parsed_resume = state.get("parsed_resume", {})
     parsed_jd = state.get("parsed_jd", {})
 

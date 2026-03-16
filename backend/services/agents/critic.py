@@ -1,15 +1,45 @@
 """Agent 9 — Critic / Reviewer Agent.
 
-Reviews the optimized resume like a skeptical recruiter + ATS auditor.
-Acts as a final quality gate before output.
+Acts as the final quality gate before the resume is scored and exported.
+Reviews the optimised draft like a **skeptical senior recruiter AND an ATS
+auditor simultaneously**.
 
-Checks:
-  - Keyword stuffing
-  - Repetition
-  - Believability
-  - Bullet specificity
-  - Role focus consistency
-  - Human readability
+Checks performed:
+    * **Keyword stuffing** — deterministic pre-check via
+      ``detect_keyword_stuffing()`` + LLM review.
+    * **Repetition** — same achievements or keywords repeated excessively.
+    * **Believability** — would a recruiter find this resume credible?
+    * **Bullet specificity** — concrete actions and results, not vague claims.
+    * **Role focus consistency** — coherent story about what the person does.
+    * **Human readability** — does it read naturally, or AI-generated?
+    * **Formatting consistency** — dates, bullet styles, section order.
+    * **Length** — appropriately concise, no padding.
+
+Pass/fail logic:
+    * Any ``severity == "high"`` issue → ``passed = False``.
+    * When failed, the ``revision_instructions`` dict tells the
+      ``rewrite_router`` which section(s) to re-optimise.
+
+Graph position:
+    ``truth_guard`` [passed] → **critic** → conditional(
+        passed  → ``final_score``,
+        failed  → ``rewrite_router``
+    )
+
+State reads:
+    ``draft_resume``, ``parsed_jd``, ``baseline_score``, ``truth_report``
+
+State writes:
+    ``critic_report`` — dict with keys: ``passed`` (bool),
+    ``overall_quality``, ``issues`` (list), ``strengths`` (list),
+    ``revision_instructions`` (dict with nullable ``summary``, ``skills``,
+    ``experience`` keys).
+
+Downstream consumers:
+    * ``_after_critic`` conditional edge — checks ``passed`` to decide routing.
+    * ``_after_rewrite_router`` — reads ``revision_instructions`` to pick
+      which optimizer to route to.
+    * ``final_score_node`` — receives the critic report for context.
 """
 
 from __future__ import annotations
@@ -63,7 +93,26 @@ Review it critically as if you're deciding whether to pass it to a hiring manage
 
 
 def critic_node(state: ResumeGraphState) -> dict:
-    """Node: review optimized resume as skeptical recruiter + ATS auditor."""
+    """LangGraph node: review optimised resume as skeptical recruiter + ATS auditor.
+
+    Workflow:
+        1. Collect all JD keywords (must-have + good-to-have + ATS), deduped.
+        2. Build a text blob from the draft resume for stuffing analysis.
+        3. Run ``detect_keyword_stuffing()`` deterministically.
+        4. Send the draft, JD analysis, baseline score, truth report, and
+           stuffing issues to the LLM for a comprehensive quality review.
+        5. Append any deterministic stuffing issues into the LLM’s ``issues``
+           list.
+        6. Auto-fail if any issue has ``severity == "high"``.
+
+    Args:
+        state: Pipeline state; reads ``draft_resume``, ``parsed_jd``,
+               ``baseline_score``, ``truth_report``.
+
+    Returns:
+        ``{"critic_report": dict}`` with ``passed``, ``overall_quality``,
+        ``issues``, ``strengths``, ``revision_instructions``.
+    """
     draft = state.get("draft_resume", {})
     parsed_jd = state.get("parsed_jd", {})
     baseline = state.get("baseline_score", {})
