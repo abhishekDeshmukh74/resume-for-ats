@@ -10,19 +10,19 @@ from __future__ import annotations
 import base64
 import logging
 
-from backend.models import ResumeData
-from backend.services.agents.state import AgentState
+from backend.models import ResumeData, TextReplacement
+from backend.services.agents.state import ResumeGraphState
 from backend.services.latex_rewriter import rewrite_tex
 from backend.services.rewriter import rewrite_pdf
 
 logger = logging.getLogger(__name__)
 
 
-def compile_pdf(state: AgentState) -> dict:
+def compile_pdf(state: ResumeGraphState) -> dict:
     """Apply replacements to the original file and return base64-encoded PDF."""
     file_b64: str = state.get("resume_file_b64", "")
     file_type: str = state.get("resume_file_type", "pdf")
-    replacements = state.get("replacements", [])
+    raw_replacements = state.get("replacements", [])
 
     if not file_b64:
         logger.warning("compile_pdf: no original file bytes available, skipping PDF compilation.")
@@ -30,8 +30,18 @@ def compile_pdf(state: AgentState) -> dict:
 
     file_bytes = base64.b64decode(file_b64)
 
-    # Minimal ResumeData used only to carry replacements into the rewriter
-    resume = ResumeData(name=state.get("name", ""), replacements=replacements)
+    # Convert raw dicts to TextReplacement objects
+    replacements = []
+    for r in raw_replacements:
+        if isinstance(r, dict) and r.get("old") and r.get("new"):
+            replacements.append(TextReplacement(old=r["old"], new=r["new"]))
+        elif isinstance(r, TextReplacement):
+            replacements.append(r)
+
+    # Build a minimal ResumeData to carry replacements into the rewriter
+    draft = state.get("draft_resume", {})
+    name = draft.get("basics", {}).get("name", "")
+    resume = ResumeData(name=name, replacements=replacements)
 
     if file_type == "tex":
         logger.info("compile_pdf: compiling LaTeX → PDF.")

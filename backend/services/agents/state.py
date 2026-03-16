@@ -1,70 +1,64 @@
-"""Shared state and schema for the LangGraph resume pipeline."""
+"""Shared state for the LangGraph resume pipeline.
+
+Structured state is the backbone of the multi-agent system.
+Each agent reads from and writes to specific keys in this shared dict.
+"""
 
 from __future__ import annotations
 
 from typing import Annotated, TypedDict
 
-from backend.models import TextReplacement
-
-
-def _merge_lists(a: list, b: list) -> list:
-    """Reducer: extend list *a* with items from *b*."""
-    return a + b
-
 
 def _overwrite(a, b):
-    """Reducer: last-write-wins."""
     return b
 
 
-class AgentState(TypedDict, total=False):
-    # ── Inputs (set once) ─────────────────────────────────────────────
-    resume_text: str                     # Original plain text from the PDF
-    jd_text: str                         # Target job description
+class ResumeGraphState(TypedDict, total=False):
+    # ── Raw Inputs ────────────────────────────────────────────────────
+    raw_resume_text: str
+    raw_jd_text: str
 
-    # ── Step 1 → Keyword Extractor ────────────────────────────────────
-    jd_keywords: Annotated[list[str], _merge_lists]  # Deduplicated JD keywords
-    keyword_categories: Annotated[dict, _overwrite]   # {category: [keywords]}
+    # ── Stage 1: Intake Parser → structured resume ────────────────────
+    parsed_resume: Annotated[dict, _overwrite]
 
-    # ── Step 2 → Resume Analyzer ──────────────────────────────────────
-    resume_sections: Annotated[dict, _overwrite]      # Identified sections & their text
-    gap_analysis: Annotated[str, _overwrite]           # Missing keywords / weak areas
+    # ── Stage 2: JD Analyzer → structured JD signals ──────────────────
+    parsed_jd: Annotated[dict, _overwrite]
 
-    # ── Step 2b → Keyword gap tracking ───────────────────────────────
-    missing_keywords: Annotated[list[str], _overwrite]     # Keywords NOT yet in resume
-    required_keywords: Annotated[list[str], _overwrite]    # High-priority required skills
-    preferred_keywords: Annotated[list[str], _overwrite]   # Nice-to-have skills
+    # ── Stage 3: Gap Analysis ─────────────────────────────────────────
+    gap_report: Annotated[dict, _overwrite]
 
-    # ── Step 3 → Rewriter ─────────────────────────────────────────────
-    raw_replacements: Annotated[list[dict], _merge_lists]  # {"old": ..., "new": ...}
+    # ── Stage 3: Baseline ATS Score ───────────────────────────────────
+    baseline_score: Annotated[dict, _overwrite]
 
-    # ── Step 4 → QA / Deduplication ───────────────────────────────────
-    replacements: Annotated[list[TextReplacement], _merge_lists]  # Final clean replacements
+    # ── Stage 4: Content Optimization ─────────────────────────────────
+    optimized_summary: Annotated[str, _overwrite]
+    optimized_skills: Annotated[dict, _overwrite]
+    optimized_experience: Annotated[list, _overwrite]
 
-    # ── Step 4b → Pre-rewrite ATS Score ────────────────────────────────
-    ats_score_before: Annotated[int, _overwrite]
+    # ── Stage 5: Merged Draft ─────────────────────────────────────────
+    draft_resume: Annotated[dict, _overwrite]
 
-    # ── Step 5 → ATS Scorer ───────────────────────────────────────────
-    ats_score: Annotated[int, _overwrite]
-    algorithmic_score: Annotated[float, _overwrite]        # Deterministic word-boundary score
-    matched_keywords: Annotated[list[str], _overwrite]     # Overwrite (not merge) for re-score
-    still_missing_keywords: Annotated[list[str], _overwrite]  # After rewrite, still missing
-    rewrite_pass: Annotated[int, _overwrite]               # 0 = first pass, 1 = refinement
+    # ── Stage 5: Truth Guard ──────────────────────────────────────────
+    truth_report: Annotated[dict, _overwrite]
 
-    # ── Structured output (for ResumeData) ────────────────────────────
-    name: Annotated[str, _overwrite]
-    email: Annotated[str | None, _overwrite]
-    phone: Annotated[str | None, _overwrite]
-    linkedin: Annotated[str | None, _overwrite]
-    github: Annotated[str | None, _overwrite]
-    location: Annotated[str | None, _overwrite]
-    summary: Annotated[str | None, _overwrite]
-    skills: Annotated[list[str], _merge_lists]
-    experience: Annotated[list[dict], _merge_lists]
-    education: Annotated[list[dict], _merge_lists]
-    certifications: Annotated[list[dict], _merge_lists]
+    # ── Stage 6: Critic / Reviewer ────────────────────────────────────
+    critic_report: Annotated[dict, _overwrite]
 
-    # ── Step 7 → PDF Compiler ─────────────────────────────────────────
-    resume_file_b64: Annotated[str, _overwrite]    # Original file (b64) passed in for rewriting
-    resume_file_type: Annotated[str, _overwrite]   # "pdf" or "tex"
-    compiled_pdf_b64: Annotated[str, _overwrite]   # Final compiled/rewritten PDF (b64)
+    # ── Stage 7: Final ATS Score ──────────────────────────────────────
+    final_score: Annotated[dict, _overwrite]
+
+    # ── Revision Control ──────────────────────────────────────────────
+    revision_count: Annotated[int, _overwrite]
+    max_revisions: Annotated[int, _overwrite]
+
+    # ── Stage 8: Export Formats ───────────────────────────────────────
+    final_resume_text: Annotated[str, _overwrite]
+    final_resume_markdown: Annotated[str, _overwrite]
+
+    # ── PDF Compilation (carried from original) ───────────────────────
+    resume_file_b64: Annotated[str, _overwrite]
+    resume_file_type: Annotated[str, _overwrite]
+    compiled_pdf_b64: Annotated[str, _overwrite]
+
+    # ── Replacements (for PDF rewriting) ──────────────────────────────
+    replacements: Annotated[list, _overwrite]

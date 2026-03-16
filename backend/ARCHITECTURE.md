@@ -2,7 +2,7 @@
 
 ## Overview
 
-FastAPI backend for the pass-ats resume tailor. Receives a PDF or LaTeX resume and job description, runs a **LangGraph multi-agent pipeline** (7 sequential AI agents) to rewrite resume content for ATS optimisation, and returns a modified PDF preserving the original layout.
+FastAPI backend for the pass-ats resume tailor. Receives a PDF or LaTeX resume and job description, runs a **LangGraph multi-agent pipeline** (8 sequential AI agents) to rewrite resume content for ATS optimisation, and returns a modified PDF preserving the original layout.
 
 ## Directory Structure
 
@@ -28,10 +28,11 @@ backend/
         ├── llm.py                # Multi-provider LLM (Groq/Gemini) + parse_llm_json()
         ├── keyword_extractor.py  # Agent 1: Extract JD keywords
         ├── resume_analyser.py    # Agent 2: Section analysis + gap identification
-        ├── scorer.py             # Agents 3 & 6: ATS scoring (before + after)
-        ├── rewriter_agent.py     # Agent 4: Generate old→new replacements
-        ├── qa_agent.py           # Agent 5: Validate & deduplicate keywords
-        ├── pdf_compiler.py       # Agent 7: Apply replacements + compile PDF
+        ├── scorer.py             # Agents 3 & 6: LLM-based ATS scoring (before + after)
+        ├── resume_rewriter.py    # Agent 4: Generate old→new replacements (all sections)
+        ├── qa_agent.py           # Agent 5: LLM-based replacement validation
+        ├── data_extractor.py     # Agent 7: Extract structured resume data
+        ├── pdf_compiler.py       # Agent 8: Apply replacements + compile PDF
         └── graph.py              # StateGraph wiring + public generate_resume()
 ```
 
@@ -45,14 +46,15 @@ Frontend                    Backend
    │    jd_text,              │
    │    resume_file_b64 }     │
    │                          ├─ agents.generate_resume()
-   │                          │   → LangGraph pipeline (7 agents):
+   │                          │   → LangGraph pipeline (8 agents):
    │                          │     1. extract_keywords  → JD keywords
    │                          │     2. analyse_resume    → gap analysis
    │                          │     3. score_before      → baseline ATS score
-   │                          │     4. rewrite_sections  → raw replacements
-   │                          │     5. qa_deduplicate    → validated replacements
-   │                          │     6. score_extract     → final ATS score + structured data
-   │                          │     7. compile_pdf       → apply replacements + produce PDF
+   │                          │     4. rewrite_resume    → raw replacements
+   │                          │     5. qa_review         → validated replacements
+   │                          │     6. score_after       → final ATS score
+   │                          │     7. extract_data      → structured data
+   │                          │     8. compile_pdf       → apply replacements + produce PDF
    │                          │   → (ResumeData, compiled_pdf_b64)
    │                          │
    │◄─ { resume, b64_pdf } ──┤
@@ -60,17 +62,18 @@ Frontend                    Backend
 
 ## LangGraph Pipeline
 
-The AI logic is split into 7 sequential agents using LangGraph's `StateGraph`:
+The AI logic is split into 8 sequential agents using LangGraph's `StateGraph`:
 
 | # | Agent | Node Name | Purpose |
 |---|-------|-----------|---------|
 | 1 | Keyword Extractor | `extract_keywords` | Extract 30–60 JD keywords, categorised |
 | 2 | Resume Analyser | `analyse_resume` | Map resume sections, find keyword gaps |
-| 3 | Pre-Rewrite Scorer | `score_before` | Baseline ATS score before any rewriting |
-| 4 | Rewriter | `rewrite_sections` | Generate old→new replacements (max 2 per keyword) |
-| 5 | QA Agent | `qa_deduplicate` | Validate old text accuracy, deduplicate keywords |
-| 6 | Final Scorer | `score_extract` | Score final resume, extract structured data |
-| 7 | PDF Compiler | `compile_pdf` | Apply replacements to original file, produce PDF |
+| 3 | Pre-Rewrite Scorer | `score_before` | LLM-based ATS score before rewriting |
+| 4 | Resume Rewriter | `rewrite_resume` | Generate old→new replacements (all sections) |
+| 5 | QA Agent | `qa_review` | LLM-based replacement validation |
+| 6 | Post-Rewrite Scorer | `score_after` | LLM-based ATS score after rewriting |
+| 7 | Data Extractor | `extract_data` | Extract structured fields (name, skills, etc.) |
+| 8 | PDF Compiler | `compile_pdf` | Apply replacements to original file, produce PDF |
 
 All agents share an `AgentState` TypedDict. See `backend/services/agents/AGENTS.md` for details.
 

@@ -1,219 +1,222 @@
-"""Agent 5 — Score the rewritten resume and extract structured data."""
+"""Agent 8 — ATS Scoring Agent.
+
+Hybrid scorer that combines:
+  1. Deterministic keyword coverage (exact match)
+  2. LLM rubric evaluation (semantic match, quality, alignment)
+  3. ATS format checker (structural)
+  4. Truthfulness score
+
+Scores resume on multiple dimensions, not a single LLM vibe-check.
+"""
 
 from __future__ import annotations
 
+import json
 import logging
 
 from backend.services.agents.llm import invoke_llm_json
-from backend.services.agents.keyword_matcher import calculate_keyword_match
-from backend.services.agents.state import AgentState
+from backend.services.agents.state import ResumeGraphState
+from backend.services.agents.tools import (
+    check_ats_format,
+    check_bullet_quality,
+    compute_ats_score,
+    compute_keyword_coverage,
+    detect_keyword_stuffing,
+)
 
 logger = logging.getLogger(__name__)
 
-_SYSTEM = """You are an ATS scoring and resume parsing specialist.
+_SCORE_SYSTEM = """You are an ATS scoring specialist using a structured rubric.
 
-You receive the fully rewritten resume text.
+You receive a resume, JD analysis, and deterministic analysis results.
+Score the resume on these dimensions (0-100 each):
 
-Your tasks:
-1. List all matched keywords.
-2. Extract structured resume data for the API response.
+1. SEMANTIC MATCH: How well does the resume's overall narrative align with the JD?
+   Not just keyword presence, but contextual relevance of experience.
 
-Return ONLY valid JSON:
+2. SECTION QUALITY: Rate the quality of bullets, summary, and skills section.
+   - Clarity: Are bullets specific and clear?
+   - Impact: Do bullets show measurable results?
+   - Alignment: Does each section support the target role?
+
+3. ROLE ALIGNMENT: Does the candidate's trajectory match the target role?
+   - Seniority fit
+   - Domain fit
+   - Responsibility overlap
+
+═══ OUTPUT FORMAT (pure JSON, no markdown) ═══
+
 {
-  "matched_keywords": ["keyword1", "keyword2"],
-  "name": "string",
-  "email": "string or null",
-  "phone": "string or null",
-  "linkedin": "string or null",
-  "github": "string or null",
-  "location": "string or null",
-  "summary": "the rewritten summary",
-  "skills": ["skill1", "skill2"],
-  "experience": [
-    {
-      "job_title": "string",
-      "company": "string",
-      "location": "string or null",
-      "start_date": "string",
-      "end_date": "string",
-      "bullets": ["rewritten bullet 1", "rewritten bullet 2"]
-    }
+  "semantic_score": 80,
+  "section_quality_score": 75,
+  "role_alignment_score": 85,
+  "impact_clarity": 78,
+  "weak_sections": ["summary", "skills"],
+  "strong_sections": ["experience"],
+  "recommendations": [
+    "Add more quantifiable metrics to experience bullets",
+    "Summary should emphasize cloud experience more"
   ],
-  "education": [
-    {
-      "degree": "string",
-      "institution": "string",
-      "location": "string or null",
-      "graduation_date": "string",
-      "details": null
-    }
-  ],
-  "certifications": []
+  "missing_high_weight_terms": ["Prisma", "Jest"]
 }"""
 
 
-_SCORE_BEFORE_SYSTEM = """You are an ATS scoring specialist.
+def _build_resume_text(parsed_resume: dict) -> str:
+    """Reconstruct readable text from parsed resume structure."""
+    parts: list[str] = []
+    basics = parsed_resume.get("basics", {})
+    if basics.get("name"):
+        parts.append(basics["name"])
+    if parsed_resume.get("summary"):
+        parts.append(f"\nSummary:\n{parsed_resume['summary']}")
 
-You receive the ORIGINAL resume text (before any rewriting) and a list of JD keywords.
-Score how well the current resume matches the JD keywords on a scale of 0-100.
+    skills = parsed_resume.get("skills", {})
+    if isinstance(skills, dict):
+        parts.append("\nSkills:")
+        for cat, items in skills.items():
+            if isinstance(items, list) and items:
+                parts.append(f"  {cat}: {', '.join(items)}")
 
-Return ONLY valid JSON:
-{
-  "ats_score_before": 55
-}
+    for exp in parsed_resume.get("experience", []):
+        parts.append(f"\n{exp.get('title', '')} at {exp.get('company', '')}")
+        for bullet in exp.get("bullets", []):
+            parts.append(f"  - {bullet}")
 
-SCORING RULES:
-- Count what percentage of JD keywords appear in the original resume.
-- Weight technical skills and job-title keywords more heavily.
-- Do NOT inflate the score — be accurate."""
+    for proj in parsed_resume.get("projects", []):
+        parts.append(f"\nProject: {proj.get('name', '')}")
+        for bullet in proj.get("bullets", []):
+            parts.append(f"  - {bullet}")
 
+    for edu in parsed_resume.get("education", []):
+        parts.append(f"\n{edu.get('degree', '')} — {edu.get('institution', '')}")
 
-def _build_sections_map(state: AgentState) -> dict[str, str] | None:
-    """Extract a section-name → text mapping from the resume analyser output."""
-    raw = state.get("resume_sections")
-    if not raw or not isinstance(raw, dict):
-        return None
-    # The analyser stores sections as {name: text} or {name: {text: ...}}.
-    sections: dict[str, str] = {}
-    for name, body in raw.items():
-        if isinstance(body, str):
-            sections[name] = body
-        elif isinstance(body, dict) and "text" in body:
-            sections[name] = body["text"]
-    return sections or None
+    return "\n".join(parts)
 
 
-def score_before_rewrite(state: AgentState) -> dict:
-    """Node: score the original resume BEFORE any rewriting."""
-    keywords = state.get("jd_keywords", [])
-    categories = state.get("keyword_categories", {})
-    sections = _build_sections_map(state)
+def _collect_bullets(parsed_resume: dict) -> list[str]:
+    """Collect all bullet points from experience and projects."""
+    bullets: list[str] = []
+    for exp in parsed_resume.get("experience", []):
+        bullets.extend(exp.get("bullets", []))
+    for proj in parsed_resume.get("projects", []):
+        bullets.extend(proj.get("bullets", []))
+    return bullets
 
-    # Algorithmic score: fuzzy + synonym + exact matching
-    algo_result = calculate_keyword_match(
-        state["resume_text"], keywords,
-        categories=categories,
-        sections=sections,
-    )
-    logger.info(
-        "ATS Pre-Rewrite Algorithmic: %.1f%% (%d matched [%d exact, %d synonym, %d fuzzy], %d missing, stuffing=%.1f)",
-        algo_result.match_percentage,
-        len(algo_result.matched),
-        algo_result.exact_count,
-        algo_result.synonym_count,
-        algo_result.fuzzy_count,
-        len(algo_result.missing),
-        algo_result.stuffing_penalty,
-    )
 
-    data = invoke_llm_json([
-        {"role": "system", "content": _SCORE_BEFORE_SYSTEM},
+def score_resume(parsed_resume: dict, parsed_jd: dict, is_baseline: bool = False) -> dict:
+    """Score a resume against JD using hybrid deterministic + LLM approach."""
+    resume_text = _build_resume_text(parsed_resume)
+
+    # ─── Deterministic Scoring ────────────────────────────────────────
+    all_keywords = list(dict.fromkeys(
+        parsed_jd.get("must_have_skills", [])
+        + parsed_jd.get("good_to_have_skills", [])
+        + parsed_jd.get("ats_keywords", [])
+    ))
+    weights = parsed_jd.get("skill_weights", {})
+
+    keyword_result = compute_keyword_coverage(resume_text, all_keywords, weights)
+    keyword_pct = keyword_result.get("weighted_score", keyword_result["coverage_pct"])
+
+    format_result = check_ats_format(resume_text)
+    format_score = format_result["score"]
+
+    bullets = _collect_bullets(parsed_resume)
+    bullet_results = check_bullet_quality(bullets)
+    good_bullets = sum(1 for b in bullet_results if b["quality"] == "good")
+    bullet_quality_pct = (good_bullets / len(bullet_results) * 100) if bullet_results else 50.0
+
+    stuffing = detect_keyword_stuffing(resume_text, all_keywords)
+
+    # ─── LLM Rubric Scoring ──────────────────────────────────────────
+    llm_data = invoke_llm_json([
+        {"role": "system", "content": _SCORE_SYSTEM},
         {"role": "user", "content": (
-            f"## Original Resume\n\n{state['resume_text']}\n\n"
-            f"## JD Keywords\n\n{', '.join(keywords)}\n\n"
-            "Score the original resume against these keywords."
-        )},
-    ])
-    llm_score = data.get("ats_score_before", 0)
-
-    # Use the lower of LLM and algorithmic as conservative estimate
-    score = min(llm_score, int(algo_result.match_percentage))
-    logger.info("ATS Pre-Rewrite Score: %d (LLM=%d, Algo=%.1f)",
-                score, llm_score, algo_result.match_percentage)
-
-    return {
-        "ats_score_before": score,
-        "missing_keywords": algo_result.missing,
-    }
-
-
-def _apply_replacements_to_text(resume_text: str, replacements: list) -> str:
-    """Apply old→new replacements to the resume text to produce the rewritten version."""
-    text = resume_text
-    for r in replacements:
-        if r.old and r.new and r.old != r.new:
-            text = text.replace(r.old, r.new, 1)
-    return text
-
-
-def score_and_extract(state: AgentState) -> dict:
-    """Node: score the final rewritten resume and extract structured fields."""
-    replacements = state.get("replacements", [])
-    rewritten_text = _apply_replacements_to_text(state["resume_text"], replacements)
-
-    keywords = state.get("jd_keywords", [])
-    categories = state.get("keyword_categories", {})
-    sections = _build_sections_map(state)
-
-    # Algorithmic score: fuzzy + synonym + exact matching with section awareness
-    algo_result = calculate_keyword_match(
-        rewritten_text, keywords,
-        categories=categories,
-        sections=sections,
-    )
-    logger.info(
-        "ATS Post-Rewrite Algorithmic: %.1f%% (%d matched [%d exact, %d synonym, %d fuzzy], "
-        "%d missing, stuffing=%.1f)",
-        algo_result.match_percentage,
-        len(algo_result.matched),
-        algo_result.exact_count,
-        algo_result.synonym_count,
-        algo_result.fuzzy_count,
-        len(algo_result.missing),
-        algo_result.stuffing_penalty,
-    )
-    if algo_result.section_scores:
-        logger.info("Section scores: %s", algo_result.section_scores)
-
-    # Log fuzzy/synonym matches for transparency
-    for d in algo_result.match_details:
-        if d.match_type in ("synonym", "fuzzy"):
-            logger.debug(
-                "  %s match: '%s' → '%s' (%.0f%%)",
-                d.match_type, d.keyword, d.matched_form, d.confidence,
-            )
-
-    data = invoke_llm_json([
-        {"role": "system", "content": _SYSTEM},
-        {"role": "user", "content": (
-            f"## Rewritten Resume\n\n{rewritten_text}\n\n"
-            f"## JD Keywords\n\n{', '.join(keywords)}\n\n"
-            f"## Job Description\n\n{state['jd_text']}\n\n"
-            "Extract structured resume data and list matched keywords."
+            f"## Resume\n\n{resume_text}\n\n"
+            f"## JD Analysis\n\n{json.dumps(parsed_jd, indent=2)}\n\n"
+            f"## Deterministic Results\n"
+            f"Keyword Coverage: {keyword_pct:.1f}%\n"
+            f"Covered: {', '.join(keyword_result['covered'])}\n"
+            f"Missing: {', '.join(keyword_result['missing'])}\n"
+            f"Format Score: {format_score}\n"
+            f"Bullet Quality: {bullet_quality_pct:.1f}% good\n"
+            f"Keyword Stuffing: {len(stuffing)} issues\n\n"
+            "Provide semantic, section quality, and role alignment scores."
         )},
     ])
 
-    # The algorithmic score is now the primary signal — it handles exact,
-    # synonym, and fuzzy matching with category weights, section placement
-    # bonuses, and stuffing penalties.  The LLM is used only for structured
-    # data extraction, not for scoring.
-    blended_score = int(round(algo_result.match_percentage))
-    matched = algo_result.matched  # Use algorithmic matched list (verifiable)
+    semantic_score = llm_data.get("semantic_score", 50)
+    section_quality = llm_data.get("section_quality_score", 50)
 
-    logger.info(
-        "ATS Scorer: score=%d (exact=%d, synonym=%d, fuzzy=%d, stuffing=-%.1f), matched=%d keywords.",
-        blended_score,
-        algo_result.exact_count,
-        algo_result.synonym_count,
-        algo_result.fuzzy_count,
-        algo_result.stuffing_penalty,
-        len(matched),
+    # Truthfulness: 100 baseline (penalized later by truth guard)
+    truthfulness = 100.0
+
+    # ─── Composite Score ─────────────────────────────────────────────
+    composite = compute_ats_score(
+        keyword_coverage_pct=keyword_pct,
+        semantic_score=semantic_score,
+        section_quality_score=section_quality,
+        ats_format_score=format_score,
+        truthfulness_score=truthfulness,
     )
 
-    return {
-        "ats_score": blended_score,
-        "algorithmic_score": algo_result.match_percentage,
-        "matched_keywords": matched,
-        "still_missing_keywords": algo_result.missing,
-        "name": data.get("name", ""),
-        "email": data.get("email"),
-        "phone": data.get("phone"),
-        "linkedin": data.get("linkedin"),
-        "github": data.get("github"),
-        "location": data.get("location"),
-        "summary": data.get("summary"),
-        "skills": data.get("skills", []),
-        "experience": data.get("experience", []),
-        "education": data.get("education", []),
-        "certifications": data.get("certifications", []),
+    result = {
+        **composite,
+        "keyword_coverage": keyword_result,
+        "format_check": format_result,
+        "bullet_quality": {
+            "total": len(bullet_results),
+            "good": good_bullets,
+            "details": bullet_results,
+        },
+        "keyword_stuffing": stuffing,
+        "semantic_score": semantic_score,
+        "section_quality_score": section_quality,
+        "role_alignment_score": llm_data.get("role_alignment_score", 50),
+        "weak_sections": llm_data.get("weak_sections", []),
+        "strong_sections": llm_data.get("strong_sections", []),
+        "recommendations": llm_data.get("recommendations", []),
+        "missing_high_weight_terms": llm_data.get("missing_high_weight_terms", []),
     }
+
+    label = "Baseline" if is_baseline else "Final"
+    logger.info("%s ATS Score: %s (keyword=%.1f, semantic=%s, format=%s).",
+                label, composite["overall_score"], keyword_pct, semantic_score, format_score)
+
+    return result
+
+
+def baseline_score_node(state: ResumeGraphState) -> dict:
+    """Node: score the original resume BEFORE optimization."""
+    parsed_resume = state.get("parsed_resume", {})
+    parsed_jd = state.get("parsed_jd", {})
+
+    result = score_resume(parsed_resume, parsed_jd, is_baseline=True)
+    return {"baseline_score": result}
+
+
+def final_score_node(state: ResumeGraphState) -> dict:
+    """Node: score the optimized resume AFTER all changes."""
+    draft = state.get("draft_resume", {})
+    parsed_jd = state.get("parsed_jd", {})
+
+    if not draft:
+        logger.warning("Final Scorer: no draft resume to score.")
+        return {"final_score": {"overall_score": 0}}
+
+    # Apply truth guard penalty
+    truth_report = state.get("truth_report", {})
+    result = score_resume(draft, parsed_jd, is_baseline=False)
+
+    # Penalize for truth violations
+    high_violations = len([
+        v for v in truth_report.get("violations", [])
+        if v.get("severity") == "high"
+    ])
+    if high_violations > 0:
+        penalty = min(20, high_violations * 5)
+        result["overall_score"] = max(0, result["overall_score"] - penalty)
+        result["breakdown"]["truthfulness"] = max(0, 100 - high_violations * 15)
+        result["truth_penalty"] = penalty
+
+    return {"final_score": result}

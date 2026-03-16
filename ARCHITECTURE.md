@@ -99,7 +99,7 @@ See [backend/ARCHITECTURE.md](backend/ARCHITECTURE.md) for full backend detail.
 | `GET /api/pipeline-runs` | `routers/pipeline.py` | `db.py` |
 | `GET /api/pipeline-runs/{id}` | `routers/pipeline.py` | `db.py` |
 
-### AI Pipeline (LangGraph — 7 sequential agents)
+### AI Pipeline (LangGraph — 8 agents, LLM-first)
 
 ```
 resume_text + jd_text
@@ -114,23 +114,27 @@ resume_text + jd_text
 └────────┬────────────┘
          ▼
 ┌─────────────────────┐
-│ 3. score_before     │  → baseline ATS score
+│ 3. score_before     │  → LLM-based baseline ATS score
 └────────┬────────────┘
          ▼
 ┌─────────────────────┐
-│ 4. rewrite_sections │  → raw old→new text replacements
+│ 4. rewrite_resume   │  → raw old→new text replacements (all sections)
 └────────┬────────────┘
          ▼
 ┌─────────────────────┐
-│ 5. qa_deduplicate   │  → validated, deduplicated replacements
+│ 5. qa_review        │  → LLM-validated replacements
 └────────┬────────────┘
          ▼
 ┌─────────────────────┐
-│ 6. score_extract    │  → final ATS score + structured ResumeData
+│ 6. score_after      │  → LLM-based post-rewrite ATS score
 └────────┬────────────┘
          ▼
 ┌─────────────────────┐
-│ 7. compile_pdf      │  → apply replacements to original file → PDF bytes
+│ 7. extract_data     │  → structured ResumeData
+└────────┬────────────┘
+         ▼
+┌─────────────────────┐
+│ 8. compile_pdf      │  → apply replacements to original file → PDF bytes
 └─────────────────────┘
        │
        ▼
@@ -153,7 +157,7 @@ All agents share an `AgentState` TypedDict. PDF resumes use PyMuPDF in-place tex
 
 3. User clicks Generate
    Browser → POST /api/generate-resume { resume_text, jd_text, resume_file_b64, resume_file_type }
-   Backend  → runs 7-agent LangGraph pipeline
+   Backend  → runs 8-agent LangGraph pipeline
             → returns { resume: ResumeData, rewritten_file_b64: string }
 
 4. User previews and downloads

@@ -2,173 +2,145 @@
 
 ## Overview
 
-The AI logic uses **LangGraph** to orchestrate a **multi-agent pipeline with a conditional refinement loop**. Each agent is a standalone node that reads from and writes to a shared `AgentState` TypedDict.
+The AI logic uses **LangGraph** to orchestrate a **multi-agent pipeline with a conditional refinement loop**. Each agent is a standalone node with a single responsibility, reading from and writing to a shared `AgentState` TypedDict.
 
-All agents use a multi-provider LLM (Groq or Google Gemini, configured via `LLM_PROVIDER` env var) with temperature 0.2 via `llm.py`.
+All agents use a multi-provider LLM (Groq or Google Gemini, configured via `LLM_PROVIDER` env var) with temperature 0.2 via `llm.py`. All text understanding, scoring, and validation is done by the LLM — no regex-based text parsing or algorithmic keyword matching.
 
 ## Pipeline Flow
 
 ```
-extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate
-→ score_extract →  ┌─ [score ≥ 90] → compile_pdf → END
-                    └─ [score < 90] → refine_rewrite → refine_qa → compile_pdf → END
+extract_keywords → analyse_resume → score_before → rewrite_resume → qa_review
+→ score_after →  ┌─ [score ≥ 85] → extract_data → compile_pdf → END
+                  └─ [score < 85] → refine_rewrite → refine_qa → extract_data → compile_pdf → END
 ```
 
 ```mermaid
 graph TD
     START((Start)) --> extract_keywords
 
-    extract_keywords["🔑 Extract Keywords\n(keyword_extractor.py)\n→ jd_keywords, required/preferred"]
-    analyse_resume["📋 Analyse Resume\n(resume_analyser.py)\n→ sections, gap_analysis"]
-    score_before["📊 Score Before\n(scorer.py)\n→ ats_score_before, missing_keywords"]
-    rewrite_sections["✏️ Rewrite Sections\n(rewriter_agent.py)\n→ raw_replacements"]
-    qa_deduplicate["✅ QA & Deduplicate\n(qa_agent.py)\n→ replacements\n+ AI phrase cleanup"]
-    score_extract["📈 Score & Extract\n(scorer.py)\n→ ats_score, still_missing_keywords\n60% algo + 40% LLM"]
-    refine_rewrite["🔄 Refine Rewrite\n(refinement_agent.py)\n→ raw_replacements (appended)"]
-    refine_qa["✅ Refine QA\n(qa_agent.py)\n→ replacements (appended)"]
-    compile_pdf["📄 Compile PDF\n(pdf_compiler.py)\n→ compiled_pdf_b64"]
+    extract_keywords["Extract Keywords\n(keyword_extractor.py)\n→ jd_keywords, categories"]
+    analyse_resume["Analyse Resume\n(resume_analyser.py)\n→ sections, gap_analysis"]
+    score_before["Score Before\n(scorer.py)\n→ ats_score_before, missing_keywords"]
+    rewrite_resume["Rewrite Resume\n(resume_rewriter.py)\n→ raw_replacements"]
+    qa_review["QA Review\n(qa_agent.py)\n→ replacements"]
+    score_after["Score After\n(scorer.py)\n→ ats_score, still_missing"]
+    refine_rewrite["Refine Rewrite\n(resume_rewriter.py)\n→ raw_replacements (appended)"]
+    refine_qa["Refine QA\n(qa_agent.py)\n→ replacements"]
+    extract_data["Extract Data\n(data_extractor.py)\n→ name, skills, experience..."]
+    compile_pdf["Compile PDF\n(pdf_compiler.py)\n→ compiled_pdf_b64"]
     END_NODE((End))
 
     extract_keywords --> analyse_resume
     analyse_resume --> score_before
-    score_before --> rewrite_sections
-    rewrite_sections --> qa_deduplicate
-    qa_deduplicate --> score_extract
+    score_before --> rewrite_resume
+    rewrite_resume --> qa_review
+    qa_review --> score_after
 
-    score_extract -->|"score ≥ 90\nOR pass > 0"| compile_pdf
-    score_extract -->|"score < 90\nAND pass == 0\nAND missing keywords"| refine_rewrite
+    score_after -->|"score ≥ 85\nOR pass > 0"| extract_data
+    score_after -->|"score < 85\nAND pass == 0\nAND missing keywords"| refine_rewrite
 
     refine_rewrite --> refine_qa
-    refine_qa --> compile_pdf
+    refine_qa --> extract_data
 
+    extract_data --> compile_pdf
     compile_pdf --> END_NODE
 
     style extract_keywords fill:#e8f5e9,stroke:#2e7d32
     style analyse_resume fill:#e3f2fd,stroke:#1565c0
     style score_before fill:#fff3e0,stroke:#e65100
-    style rewrite_sections fill:#fce4ec,stroke:#c62828
-    style qa_deduplicate fill:#f3e5f5,stroke:#6a1b9a
-    style score_extract fill:#fff3e0,stroke:#e65100
+    style rewrite_resume fill:#fce4ec,stroke:#c62828
+    style qa_review fill:#f3e5f5,stroke:#6a1b9a
+    style score_after fill:#fff3e0,stroke:#e65100
     style refine_rewrite fill:#ffebee,stroke:#b71c1c
     style refine_qa fill:#f3e5f5,stroke:#6a1b9a
+    style extract_data fill:#e8eaf6,stroke:#283593
     style compile_pdf fill:#e0f2f1,stroke:#00695c
 ```
 
-## Key Improvements
+## Design Principles
 
-1. **Enhanced Algorithmic Scoring** — Uses `rapidfuzz` for multi-signal keyword matching: exact word-boundary, synonym/abbreviation expansion (50+ tech aliases), and fuzzy matching for typos/variations. LLM is used only for structured data extraction, not scoring.
-2. **Section-Aware Scoring** — Keywords found in high-value sections (title 1.4×, summary 1.3×, skills 1.2×) receive placement bonuses, reflecting real ATS behaviour.
-3. **Keyword Stuffing Detection** — Penalises resumes that repeat keywords excessively (>4 occurrences), deducting up to 15 points.
-4. **Priority Keywords** — Extracts `required_skills` vs `preferred_skills` from JD so the rewriter prioritises must-have keywords.
-5. **Missing Keyword Focus** — The rewriter receives explicit lists of MISSING keywords (not all keywords) with priority levels (REQUIRED / PREFERRED / OTHER).
-6. **Conditional Refinement Loop** — If the first-pass score is below 90, a focused refinement agent injects still-missing keywords into the already-rewritten resume.
-7. **AI Phrase Cleanup** — Replaces AI-sounding buzzwords ("spearheaded", "leveraged", "synergized") with simpler human-sounding alternatives.
+1. **LLM-first** — All text understanding (scoring, matching, validation) is done by the LLM. No algorithmic keyword matching, fuzzy matching, synonym maps, or regex-based text parsing.
+2. **Single responsibility** — Each agent does ONE thing. Scoring is separate from data extraction. Rewriting is a single agent (not 3 parallel section-specific rewriters).
+3. **No regex for text understanding** — Regex is only used where genuinely appropriate: LaTeX syntax handling, input sanitisation, and prompt injection detection.
+4. **Simple refinement** — If score < 85 after the first pass, ONE refinement pass targets unmodified resume sections with still-missing keywords.
 
 ## Agent Details
 
 ### Agent 1 — Keyword Extractor (`keyword_extractor.py`)
 
 **Input**: `jd_text`
-**Output**: `jd_keywords`, `keyword_categories`, `required_keywords`, `preferred_keywords`
+**Output**: `jd_keywords`, `keyword_categories`
 
-Extracts 30–60 unique keywords from the job description and categorises them into:
-- `technical_skills`, `soft_skills`, `tools_platforms`
-- `domain_knowledge`, `certifications`, `action_verbs`
-- `required_skills` — must-have keywords from core requirements
-- `preferred_skills` — nice-to-have keywords from secondary mentions
+Extracts 30–60 unique keywords from the job description and categorises them (technical skills, tools/platforms, domain knowledge, soft skills, certifications, action verbs).
 
 ### Agent 2 — Resume Analyser (`resume_analyser.py`)
 
 **Input**: `resume_text`, `jd_keywords`
-**Output**: `resume_sections`, `gap_analysis`
+**Output**: `resume_sections`, `gap_analysis`, `missing_keywords`
 
-- Identifies resume sections (summary, skills, each experience entry, education)
-- Maps which keywords are already present vs missing
-- Produces a gap analysis with specific placement recommendations
+Identifies resume sections, maps which keywords are present vs missing, and produces a gap analysis with placement recommendations.
 
 ### Agent 3 — Pre-Rewrite Scorer (`scorer.py`)
 
-**Input**: `resume_text`, `jd_keywords`, `keyword_categories`, `resume_sections`
+**Input**: `resume_text`, `jd_keywords`
 **Output**: `ats_score_before`, `missing_keywords`
 
-Scores the **original** resume using **multi-signal algorithmic matching** (via `rapidfuzz`):
-- **Exact**: word-boundary regex matching
-- **Synonym**: 50+ tech abbreviation expansions (e.g. `k8s` → `kubernetes`, `JS` → `javascript`)
-- **Fuzzy**: rapidfuzz token matching (≥80% similarity threshold) for typos/variations
-- **Category weights**: tech skills 1.5×, certifications 1.25×
-- **Section placement**: keywords in title/summary/skills get bonus weight
-- **Stuffing penalty**: -3 pts per keyword appearing >4 times (max -15)
-- LLM provides a secondary score; final = conservative min(LLM, algorithmic)
-- Also identifies which keywords are missing from the original resume
+Pure LLM scoring. The LLM evaluates keyword coverage, considering exact matches, synonyms, abbreviations, and contextual relevance. Returns a 0–100 score and the list of missing keywords.
 
-### Agent 4 — Rewriter (`rewriter_agent.py`)
+### Agent 4 — Resume Rewriter (`resume_rewriter.py`)
 
-**Input**: `resume_text`, `keyword_categories`, `gap_analysis`, `missing_keywords`, `required_keywords`, `preferred_keywords`
+**Input**: `resume_text`, `keyword_categories`, `missing_keywords`, `gap_analysis`
 **Output**: `raw_replacements` (list of `{old, new}` dicts)
 
-Generates old→new text replacements with strict rules:
-- `old` must be **verbatim** from the original resume (character-for-character)
+Single rewriter for ALL resume sections (skills, summary, experience). Generates old→new text replacements:
+- `old` must be **verbatim** from the original resume
 - `new` must be within **±20%** of the same length
 - Each keyword appears at **most 2 times** across all replacements
-- Keywords are spread evenly; synonyms/variations are used
-- Receives explicit priority blocks: 🔴 REQUIRED → 🟡 PREFERRED → 🟢 OTHER missing keywords
-- Prioritises skills section as the "easiest win" for keyword injection
+- Skills section gets missing technical keywords as comma-separated items
+- Experience bullets get 2–3 relevant keywords each, spread evenly
+- All metrics and numbers preserved
+
+Also provides `refine_rewrite()` for the second pass, which targets resume sections NOT modified in the first pass to inject still-missing keywords.
 
 ### Agent 5 — QA Agent (`qa_agent.py`)
 
 **Input**: `resume_text`, `jd_keywords`, `raw_replacements`
-**Output**: `replacements` (list of `TextReplacement` Pydantic models)
+**Output**: `replacements` (list of `TextReplacement`)
 
-Validates and fixes:
-1. Checks each `old` text exists in the original resume
-2. Counts keyword frequency across all `new` texts, flags overuse (>2)
-3. Instructs LLM to fix duplicates with synonyms
-4. Programmatic dedup safety net (removes duplicate `old` entries)
-5. Enforces skills section format consistency
-6. **AI phrase cleanup**: replaces 30+ AI-sounding phrases with simpler alternatives (e.g. "spearheaded" → "led", "leveraged" → "used")
+Pure LLM validation. Reviews each replacement for:
+- Verbatim `old` text accuracy
+- Keyword duplication (>2 occurrences → use synonyms)
+- Metric preservation
+- Filler removal
+- Length constraints (±20%)
+- Natural language quality (no AI-sounding words)
 
-### Agent 6 — Final Scorer (`scorer.py`)
+### Agent 6 — Post-Rewrite Scorer (`scorer.py`)
 
-**Input**: `resume_text`, `jd_keywords`, `jd_text`, `replacements`, `keyword_categories`, `resume_sections`
-**Output**: `ats_score`, `matched_keywords`, `algorithmic_score`, `still_missing_keywords`, `name`, `email`, `skills`, `experience`, etc.
+**Input**: `resume_text`, `jd_keywords`, `replacements`
+**Output**: `ats_score`, `matched_keywords`, `still_missing_keywords`
 
-- Applies replacements to produce the "final resume" text
-- Runs **multi-signal algorithmic scoring** via `rapidfuzz`:
-  - Exact word-boundary + synonym expansion + fuzzy matching
-  - Category weights (tech 1.5×) + section placement bonuses
-  - Keyword stuffing penalty (up to -15 pts)
-- LLM is used **only for structured data extraction** (name, skills, experience, etc.) — not for scoring
-- Reports `still_missing_keywords` used by the refinement loop
-- Match details logged: each keyword shows match type (exact/synonym/fuzzy) and confidence
+Same LLM scoring as Agent 3, applied to the rewritten resume text (after replacements). Reports `still_missing_keywords` used by the conditional refinement.
 
-### Conditional Refinement (if score < 90)
+### Conditional Refinement (if score < 85 AND pass == 0)
 
-### Agent 6b — Refinement Writer (`refinement_agent.py`)
+The refinement rewriter (`refine_rewrite`) targets parts of the resume NOT modified in the first pass. Followed by the same QA review.
 
-**Input**: `resume_text`, `replacements`, `still_missing_keywords`, `required_keywords`
-**Output**: `raw_replacements` (appended), `rewrite_pass` = 1
+### Agent 7 — Data Extractor (`data_extractor.py`)
 
-Targeted second-pass keyword injection:
-- Applies existing replacements to get current resume text
-- Focuses specifically on `still_missing_keywords`, prioritising required ones
-- Targets skills section and summary as highest-impact areas
-- Uses exact JD phrasing for ATS compatibility
-- Only runs once (pass 0 → pass 1, no further loops)
+**Input**: `resume_text`, `replacements`
+**Output**: `name`, `email`, `phone`, `linkedin`, `github`, `location`, `summary`, `skills`, `experience`, `education`, `certifications`
 
-### Agent 6c — Refinement QA (`qa_agent.py`)
+Applies replacements to the resume text, then uses the LLM to extract structured fields for the API response.
 
-Same QA agent as Agent 5, validates the refinement replacements.
-
-### Agent 7 — PDF Compiler (`pdf_compiler.py`)
+### Agent 8 — PDF Compiler (`pdf_compiler.py`)
 
 **Input**: `replacements`, `resume_file_b64`, `resume_file_type`
 **Output**: `compiled_pdf_b64`
 
-Applies the validated replacements to the original file and produces the final PDF:
+Applies validated replacements to the original file:
 - **PDF uploads** → `rewriter.py` (PyMuPDF in-place text replacement)
 - **LaTeX uploads** → `latex_rewriter.py` (source patching + xelatex/pdflatex compilation)
-
-If no original file is available, returns an empty string (the pipeline can still return structured `ResumeData` without a compiled file).
 
 ## Pipeline Run Tracking
 
@@ -187,22 +159,20 @@ The run ID is stored in a `contextvars.ContextVar` for thread-safe tracking.
 ## Shared State (`state.py`)
 
 `AgentState` is a `TypedDict` with annotated reducers:
-- **List fields** use `_merge_lists` (extend, not replace)
-- **Scalar/dict fields** use `_overwrite` (last-write-wins)
+- **`raw_replacements`** uses `_merge_lists` (accumulates across rewrite passes)
+- **Everything else** uses `_overwrite` (last-write-wins)
 
 Key state fields:
 
 | Category | Fields |
 |----------|--------|
 | Inputs | `resume_text`, `jd_text`, `resume_file_b64`, `resume_file_type` |
-| Agent 1 | `jd_keywords` (list, merge), `keyword_categories` (dict, overwrite), `required_keywords` (list, overwrite), `preferred_keywords` (list, overwrite) |
-| Agent 2 | `resume_sections` (dict, overwrite), `gap_analysis` (str, overwrite) |
-| Agent 3 | `ats_score_before` (int, overwrite), `missing_keywords` (list, overwrite) |
-| Agent 4 | `raw_replacements` (list, merge) |
-| Agent 5 | `replacements` (list[TextReplacement], merge) |
-| Agent 6 | `ats_score` (int), `matched_keywords` (list, overwrite), `algorithmic_score` (float, overwrite), `still_missing_keywords` (list, overwrite), structured fields |
-| Refinement | `rewrite_pass` (int, overwrite) — tracks which pass we're on (0 = initial, 1 = refinement) |
-| Agent 7 | `compiled_pdf_b64` (str, overwrite) |
+| Keywords | `jd_keywords` (list, merge), `keyword_categories` (dict, overwrite) |
+| Analysis | `resume_sections`, `gap_analysis`, `missing_keywords` |
+| Rewriting | `raw_replacements` (list, merge), `replacements` (list, overwrite) |
+| Scoring | `ats_score_before`, `ats_score`, `matched_keywords`, `still_missing_keywords`, `rewrite_pass` |
+| Structured Data | `name`, `email`, `phone`, `linkedin`, `github`, `location`, `summary`, `skills`, `experience`, `education`, `certifications` |
+| PDF | `compiled_pdf_b64` |
 
 ## LLM Configuration (`llm.py`)
 
@@ -215,7 +185,7 @@ The LLM provider is selected by the `LLM_PROVIDER` env var (`"groq"` or `"gemini
 | Max tokens | `8192` | `8192` |
 | Provider | `langchain-groq` (`ChatGroq`) | `langchain-google-genai` (`ChatGoogleGenerativeAI`) |
 
-`parse_llm_json()` safely extracts JSON from LLM responses, handling markdown code fences. Includes a multi-pass JSON repair pipeline for truncated or malformed output (trailing comma removal → bracket closure → regex object extraction).
+`parse_llm_json()` safely extracts JSON from LLM responses, handling markdown code fences. Includes lightweight JSON repair for truncated output (trailing comma removal + bracket closure).
 
 ## Public API (`graph.py`)
 
@@ -229,4 +199,4 @@ resume_data, compiled_pdf_b64 = generate_resume(
 )
 ```
 
-Returns `(ResumeData, compiled_pdf_b64)`. Drop-in replacement for the previous monolithic `groq_service.generate_resume()`.
+Returns `(ResumeData, compiled_pdf_b64)`.

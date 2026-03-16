@@ -54,38 +54,6 @@ def _latex_escape(text: str) -> str:
     return text
 
 
-# Characters that _strip_latex converts from \X → X in plain text.
-_LATEX_SPECIAL_CHARS = frozenset("%&$#_")
-
-
-def _build_flexible_pattern(plain_text: str) -> str:
-    """Build a regex from *plain_text* that tolerates .tex line-wrapping
-    (whitespace differences) and optional LaTeX backslash escapes before
-    special characters (``\\%``, ``\\&``, etc.).
-
-    This lets us find the AI's single-line plain-text ``old`` string inside
-    the original ``.tex`` source even when the source wraps long lines with
-    newlines + indentation.
-    """
-    parts: list[str] = []
-    i = 0
-    while i < len(plain_text):
-        ch = plain_text[i]
-        if ch in (" ", "\t", "\n", "\r"):
-            # Consume consecutive whitespace, emit flexible \s+
-            while i < len(plain_text) and plain_text[i] in (" ", "\t", "\n", "\r"):
-                i += 1
-            parts.append(r"\s+")
-        elif ch in _LATEX_SPECIAL_CHARS:
-            # Allow an optional preceding backslash (\% vs %)
-            parts.append(r"\\?" + re.escape(ch))
-            i += 1
-        else:
-            parts.append(re.escape(ch))
-            i += 1
-    return "".join(parts)
-
-
 # ---------------------------------------------------------------------------
 # Compiler detection
 # ---------------------------------------------------------------------------
@@ -156,37 +124,15 @@ def rewrite_tex(tex_bytes: bytes, resume: ResumeData) -> bytes:
             tex_source = tex_source.replace(repl.old, new_text, 1)
             total_matched += 1
         else:
-            # Fallback 1 (forward-compat): AI was given fixed plain text where
-            # \% appeared as %; re-escape % → \% to find the match in source.
+            # Fallback: AI was given plain text where \% appeared as %;
+            # re-escape % → \% to find the match in the .tex source.
             escaped_old = _latex_escape(repl.old)
-            # Fallback 2 (backward-compat): broken parser stripped \%  as a
-            # comment, leaving a bare \ in the plain text. Restore \% so the
-            # old string matches the original source.
-            restored_old = re.sub(r"\\(?=[^a-zA-Z*{\\]|$)", r"\\%", repl.old)
-
             if escaped_old != repl.old and escaped_old in tex_source:
                 tex_source = tex_source.replace(escaped_old, new_text, 1)
                 total_matched += 1
-                logger.debug("LaTeX rewriter: matched via %% escape for '%s…'", repl.old[:60])
-            elif restored_old != repl.old and restored_old in tex_source:
-                # Mirror the same \% restoration in new_text so the LaTeX
-                # group structure (e.g. closing }) is preserved correctly.
-                restored_new = re.sub(r"\\(?=[^a-zA-Z*{\\]|$)", r"\\%", new_text)
-                tex_source = tex_source.replace(restored_old, restored_new, 1)
-                total_matched += 1
-                logger.debug("LaTeX rewriter: matched via \\%% restore for '%s…'", repl.old[:60])
+                logger.debug("LaTeX rewriter: matched via escape for '%s…'", repl.old[:60])
             else:
-                # Fallback 3 (flexible): handle .tex line-wrapping (newlines
-                # + indentation where the plain text has a single space) and
-                # optional LaTeX backslash escapes (\%, \&, etc.).
-                pattern = _build_flexible_pattern(repl.old)
-                m = re.search(pattern, tex_source)
-                if m:
-                    tex_source = tex_source[:m.start()] + new_text + tex_source[m.end():]
-                    total_matched += 1
-                    logger.debug("LaTeX rewriter: matched via flexible pattern for '%s…'", repl.old[:60])
-                else:
-                    logger.debug("LaTeX rewriter: no match for '%s…'", repl.old[:60])
+                logger.debug("LaTeX rewriter: no match for '%s…'", repl.old[:60])
 
     logger.info(
         "LaTeX rewriter: matched %d / %d replacements.",
