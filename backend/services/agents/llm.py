@@ -10,6 +10,41 @@ import re
 from langchain_groq import ChatGroq
 from langchain_google_genai import ChatGoogleGenerativeAI
 
+# ---------------------------------------------------------------------------
+# Prompt-injection sanitisation
+# ---------------------------------------------------------------------------
+_INJECTION_PATTERNS: list[re.Pattern] = [
+    re.compile(r"ignore\s+(all\s+)?(previous|above|prior)\s+instructions", re.I),
+    re.compile(r"disregard\s+(all\s+)?(previous|above|prior)\s+instructions", re.I),
+    re.compile(r"override\s+(all\s+)?(previous|above|prior)\s+instructions", re.I),
+    re.compile(r"forget\s+(all\s+)?(previous|above|prior)\s+instructions", re.I),
+    re.compile(r"you\s+are\s+now\b", re.I),
+    re.compile(r"act\s+as\s+if\b", re.I),
+    re.compile(r"pretend\s+you\s+are\b", re.I),
+    re.compile(r"\bsystem\s*:", re.I),
+    re.compile(r"\[/?INST\]", re.I),
+    re.compile(r"<\|im_start\|>", re.I),
+    re.compile(r"<\|im_end\|>", re.I),
+    re.compile(r"<<\s*SYS\s*>>", re.I),
+    re.compile(r"BEGIN\s+INSTRUCTION", re.I),
+    re.compile(r"END\s+INSTRUCTION", re.I),
+    re.compile(r"\bdo\s+not\s+follow\b.*\binstructions\b", re.I),
+    re.compile(r"reveal\s+(your|the)\s+(system|initial)\s+prompt", re.I),
+    re.compile(r"output\s+your\s+(system|initial)\s+prompt", re.I),
+]
+
+
+def _sanitize_user_input(text: str) -> str:
+    """Strip prompt-injection patterns from user-supplied text.
+
+    Removes substrings that attempt to override system instructions, inject
+    role tokens, or extract the system prompt.  The cleaned text is returned.
+    """
+    for pat in _INJECTION_PATTERNS:
+        text = pat.sub("", text)
+    return text
+
+
 _FENCE_RE = re.compile(r"```(?:json)?\s*\n?(.*?)\n?\s*```", re.DOTALL)
 # Matches a complete {"old": "...", "new": "..."} replacement object
 _REPL_OBJ_RE = re.compile(

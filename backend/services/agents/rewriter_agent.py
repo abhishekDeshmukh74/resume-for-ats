@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 
-from backend.services.agents.llm import invoke_llm_json
+from backend.services.agents.llm import invoke_llm_json, _sanitize_user_input
 from backend.services.agents.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -114,10 +114,11 @@ def rewrite_sections(state: AgentState) -> dict:
     if missing_other:
         priority_block += f"\n🟢 NICE TO ADD (other missing): {', '.join(missing_other)}"
 
+    resume_text = _sanitize_user_input(state["resume_text"])
     data = invoke_llm_json([
         {"role": "system", "content": _SYSTEM},
         {"role": "user", "content": (
-            f"## Original Resume\n\n{state['resume_text']}\n\n"
+            f"## Original Resume\n\n{resume_text}\n\n"
             f"## JD Keywords by Category\n\n{keywords_block}\n\n"
             f"## MISSING Keywords (these MUST be added){priority_block}\n\n"
             f"## Gap Analysis\n\n{gap}\n\n"

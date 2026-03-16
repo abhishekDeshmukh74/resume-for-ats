@@ -13,4 +13,4 @@ langchain-google-genai==4.0.0
 langchain-core==1.2.18
 pymongo[srv]==4.12.1
 python-json-logger==3.3.0
-rapidfuzz==3.12.2
+rapidfuzz==3.14.3

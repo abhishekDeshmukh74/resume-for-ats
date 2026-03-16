@@ -1,8 +1,12 @@
-"""LangGraph pipeline — wires agents into a sequential graph with refinement loop.
+"""LangGraph pipeline — wires agents into a graph with parallel rewriting and refinement loop.
 
 Flow:
-  extract_keywords → analyse_resume → score_before → rewrite_sections → qa_deduplicate
-  → score_extract → [if score < 90 & pass == 0: refine_rewrite → refine_qa → score_extract]
+  extract_keywords → analyse_resume → score_before
+  → ┌ rewrite_skills  ┐
+    │ rewrite_summary  │  (parallel)
+    └ rewrite_experience┘
+  → qa_deduplicate → score_extract
+  → [if score < 90 & pass == 0: refine_rewrite → refine_qa → score_extract]
   → compile_pdf
 
 Each node reads from / writes to the shared AgentState.
@@ -21,7 +25,9 @@ from backend.models import ResumeData
 from backend.services.agents.state import AgentState
 from backend.services.agents.keyword_extractor import extract_keywords
 from backend.services.agents.resume_analyser import analyse_resume
-from backend.services.agents.rewriter_agent import rewrite_sections
+from backend.services.agents.skills_rewriter import rewrite_skills
+from backend.services.agents.summary_rewriter import rewrite_summary
+from backend.services.agents.experience_rewriter import rewrite_experience
 from backend.services.agents.refinement_agent import refine_rewrite
 from backend.services.agents.qa_agent import qa_and_deduplicate
 from backend.services.agents.scorer import score_before_rewrite, score_and_extract
@@ -47,7 +53,9 @@ _AGENT_INPUT_KEYS: dict[str, list[str]] = {
     "extract_keywords": ["jd_text"],
     "analyse_resume": ["resume_text", "jd_keywords"],
     "score_before": ["resume_text", "jd_keywords"],
-    "rewrite_sections": ["resume_text", "keyword_categories", "gap_analysis", "missing_keywords", "required_keywords"],
+    "rewrite_skills": ["resume_text", "resume_sections", "keyword_categories", "missing_keywords", "required_keywords"],
+    "rewrite_summary": ["resume_text", "resume_sections", "keyword_categories", "missing_keywords", "required_keywords", "gap_analysis"],
+    "rewrite_experience": ["resume_text", "resume_sections", "keyword_categories", "missing_keywords", "required_keywords", "preferred_keywords", "gap_analysis"],
     "qa_deduplicate": ["resume_text", "raw_replacements", "jd_keywords"],
     "score_extract": ["resume_text", "jd_text", "jd_keywords", "replacements"],
     "refine_rewrite": ["resume_text", "replacements", "still_missing_keywords", "required_keywords", "keyword_categories"],
@@ -107,7 +115,9 @@ _builder = StateGraph(AgentState)
 _builder.add_node("extract_keywords", _tracked("extract_keywords", extract_keywords))
 _builder.add_node("analyse_resume", _tracked("analyse_resume", analyse_resume))
 _builder.add_node("score_before", _tracked("score_before", score_before_rewrite))
-_builder.add_node("rewrite_sections", _tracked("rewrite_sections", rewrite_sections))
+_builder.add_node("rewrite_skills", _tracked("rewrite_skills", rewrite_skills))
+_builder.add_node("rewrite_summary", _tracked("rewrite_summary", rewrite_summary))
+_builder.add_node("rewrite_experience", _tracked("rewrite_experience", rewrite_experience))
 _builder.add_node("qa_deduplicate", _tracked("qa_deduplicate", qa_and_deduplicate))
 _builder.add_node("score_extract", _tracked("score_extract", score_and_extract))
 _builder.add_node("refine_rewrite", _tracked("refine_rewrite", refine_rewrite))
@@ -117,8 +127,14 @@ _builder.add_node("compile_pdf", _tracked("compile_pdf", compile_pdf))
 _builder.set_entry_point("extract_keywords")
 _builder.add_edge("extract_keywords", "analyse_resume")
 _builder.add_edge("analyse_resume", "score_before")
-_builder.add_edge("score_before", "rewrite_sections")
-_builder.add_edge("rewrite_sections", "qa_deduplicate")
+# Fan-out: run all three section rewriters in parallel
+_builder.add_edge("score_before", "rewrite_skills")
+_builder.add_edge("score_before", "rewrite_summary")
+_builder.add_edge("score_before", "rewrite_experience")
+# Fan-in: all three must finish before QA
+_builder.add_edge("rewrite_skills", "qa_deduplicate")
+_builder.add_edge("rewrite_summary", "qa_deduplicate")
+_builder.add_edge("rewrite_experience", "qa_deduplicate")
 _builder.add_edge("qa_deduplicate", "score_extract")
 
 # Conditional: refine if score < 90, otherwise go to compile
@@ -148,7 +164,7 @@ def generate_resume(
         (ResumeData, compiled_pdf_b64)  where *compiled_pdf_b64* is the
         base64-encoded rewritten PDF produced by the final compile_pdf node.
     """
-    logger.info("Starting LangGraph pipeline (7 agents).")
+    logger.info("Starting LangGraph pipeline (9 agents).")
 
     run_id = create_pipeline_run(resume_text, jd_text)
     token = _current_run_id.set(run_id)

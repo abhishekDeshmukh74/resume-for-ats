@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 
-from backend.services.agents.llm import invoke_llm_json
+from backend.services.agents.llm import invoke_llm_json, _sanitize_user_input
 from backend.services.agents.state import AgentState
 
 logger = logging.getLogger(__name__)
@@ -80,7 +80,9 @@ def refine_rewrite(state: AgentState) -> dict:
         return {"rewrite_pass": 1}
 
     # Build the current resume text with first-pass replacements applied
-    current_text = _apply_replacements_to_text(state["resume_text"], replacements)
+    current_text = _sanitize_user_input(
+        _apply_replacements_to_text(state["resume_text"], replacements)
+    )
 
     # Separate missing keywords by priority
     missing_required = [kw for kw in still_missing if kw in required]
