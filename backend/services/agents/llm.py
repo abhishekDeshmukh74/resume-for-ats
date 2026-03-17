@@ -127,7 +127,7 @@ def parse_llm_json(text) -> dict:
 
     Handles the full spectrum of LLM response formats:
         * Clean JSON.
-        * JSON wrapped in \`\`\`json ... \`\`\` fences.
+        * JSON wrapped in triple-backtick json fences.
         * Multi-part content lists (Gemini sometimes returns these).
         * Empty / None responses (raises ``ValueError``).
 
