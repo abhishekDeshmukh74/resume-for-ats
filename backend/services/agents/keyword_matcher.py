@@ -82,6 +82,34 @@ _SECTION_WEIGHTS: dict[str, float] = {
 _DEFAULT_SECTION_WEIGHT = 1.0
 
 
+def _sentence_position_bonus(keyword: str, text: str) -> float:
+    """Return an additive bonus (0.0–0.15) if *keyword* appears near the
+    beginning of a sentence.  ATS parsers weight early-sentence keywords
+    more heavily because they signal intent rather than filler context.
+
+    Returns 0.15 for first-third, 0.05 for middle-third, 0.0 for last-third.
+    """
+    kw_lower = keyword.lower()
+    escaped = re.escape(kw_lower)
+    # Split on sentence boundaries (period/newline followed by space or EOL)
+    sentences = re.split(r'(?<=[.!?\n])\s+', text.lower())
+    best = 0.0
+    for sentence in sentences:
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        m = re.search(rf"\b{escaped}\b", sentence)
+        if m is None:
+            continue
+        pos_ratio = m.start() / max(len(sentence), 1)
+        if pos_ratio < 0.33:
+            best = max(best, 0.15)
+        elif pos_ratio < 0.66:
+            best = max(best, 0.05)
+        # else: no bonus
+    return best
+
+
 @dataclass
 class KeywordMatch:
     """Details about how a single keyword was matched."""
@@ -294,8 +322,9 @@ def calculate_keyword_match(
         kw_lower = d.keyword.lower()
         base = cat_weights.get(kw_lower, 1.0)
         place = placement_bonus.get(kw_lower, _DEFAULT_SECTION_WEIGHT)
-        w = base * place
-        total_weight += w
+        pos = _sentence_position_bonus(kw_lower, text_lower) if d.match_type != "none" else 0.0
+        w = base * (place + pos)
+        total_weight += base * place  # Denominator uses base weight (no position bonus)
         if d.match_type != "none":
             # Fuzzy matches contribute proportionally to their confidence
             matched_weight += w * (d.confidence / 100.0)

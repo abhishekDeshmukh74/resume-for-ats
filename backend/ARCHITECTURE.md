@@ -2,7 +2,7 @@
 
 ## Overview
 
-FastAPI backend for the pass-ats resume tailor. Receives a PDF or LaTeX resume and job description, runs a **LangGraph multi-agent pipeline** (7 sequential AI agents) to rewrite resume content for ATS optimisation, and returns a modified PDF preserving the original layout.
+FastAPI backend for the Resume for ATS resume tailor. Receives a PDF or LaTeX resume and job description, runs a **LangGraph multi-agent pipeline** (7 sequential AI agents) to rewrite resume content for ATS optimisation, and returns a modified PDF preserving the original layout.
 
 ## Directory Structure
 

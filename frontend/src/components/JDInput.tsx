@@ -3,6 +3,7 @@ import { scrapeJd } from '../api/client';
 
 interface JDInputProps {
   onDone: (jdText: string) => void;
+  onPreview?: (jdText: string) => void;
 }
 
 type Tab = 'paste' | 'url';
@@ -12,7 +13,7 @@ const TAB_LABELS: Record<Tab, string> = {
   url: 'From URL',
 };
 
-const JDInput = ({ onDone }: JDInputProps) => {
+const JDInput = ({ onDone, onPreview }: JDInputProps) => {
   const [tab, setTab] = useState<Tab>('paste');
   const [pasteText, setPasteText] = useState('');
   const [url, setUrl] = useState('');
@@ -77,12 +78,28 @@ const JDInput = ({ onDone }: JDInputProps) => {
             value={pasteText}
             onChange={(e) => setPasteText(e.target.value)}
           />
-          <button
-            onClick={handlePasteSubmit}
-            className="w-full py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
-          >
-            Continue
-          </button>
+          <div className="flex gap-2">
+            <button
+              onClick={handlePasteSubmit}
+              className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
+            >
+              Generate
+            </button>
+            {onPreview && (
+              <button
+                onClick={() => {
+                  if (!pasteText.trim()) {
+                    setError('Please paste the job description text.');
+                    return;
+                  }
+                  onPreview(pasteText.trim());
+                }}
+                className="flex-1 py-2.5 rounded-xl border border-purple-300 text-purple-600 text-sm font-semibold hover:bg-purple-50 transition-colors"
+              >
+                Preview Changes
+              </button>
+            )}
+          </div>
         </div>
       )}
 

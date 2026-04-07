@@ -1,4 +1,4 @@
-# Backend — pass-ats API
+# Backend — Resume for ATS API
 
 FastAPI backend that parses PDF and LaTeX resumes, scrapes job descriptions, runs a **LangGraph multi-agent pipeline** (7 sequential AI agents) to tailor resume content for ATS, and produces a final PDF with updated text.
 

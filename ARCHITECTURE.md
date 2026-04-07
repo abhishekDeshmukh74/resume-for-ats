@@ -2,7 +2,7 @@
 
 ## Overview
 
-pass-ats is a full-stack web application that takes a resume (PDF or LaTeX) and a job description, then uses a **LangGraph multi-agent AI pipeline** to produce an ATS-optimised version of the resume while preserving the original file's formatting and layout.
+Resume for ATS is a full-stack web application that takes a resume (PDF or LaTeX) and a job description, then uses a **LangGraph multi-agent AI pipeline** to produce an ATS-optimised version of the resume while preserving the original file's formatting and layout.
 
 ---
 

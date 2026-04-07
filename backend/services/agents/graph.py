@@ -150,6 +150,41 @@ _builder.add_edge("compile_pdf", END)
 graph = _builder.compile()
 
 
+# ── Preview-only graph (no PDF compilation) ───────────────────────────────
+
+_preview_builder = StateGraph(AgentState)
+
+_preview_builder.add_node("extract_keywords", _tracked("extract_keywords", extract_keywords))
+_preview_builder.add_node("analyse_resume", _tracked("analyse_resume", analyse_resume))
+_preview_builder.add_node("score_before", _tracked("score_before", score_before_rewrite))
+_preview_builder.add_node("rewrite_skills", _tracked("rewrite_skills", rewrite_skills))
+_preview_builder.add_node("rewrite_summary", _tracked("rewrite_summary", rewrite_summary))
+_preview_builder.add_node("rewrite_experience", _tracked("rewrite_experience", rewrite_experience))
+_preview_builder.add_node("qa_deduplicate", _tracked("qa_deduplicate", qa_and_deduplicate))
+_preview_builder.add_node("score_extract", _tracked("score_extract", score_and_extract))
+_preview_builder.add_node("refine_rewrite", _tracked("refine_rewrite", refine_rewrite))
+_preview_builder.add_node("refine_qa", _tracked("refine_qa", qa_and_deduplicate))
+
+_preview_builder.set_entry_point("extract_keywords")
+_preview_builder.add_edge("extract_keywords", "analyse_resume")
+_preview_builder.add_edge("analyse_resume", "score_before")
+_preview_builder.add_edge("score_before", "rewrite_skills")
+_preview_builder.add_edge("score_before", "rewrite_summary")
+_preview_builder.add_edge("score_before", "rewrite_experience")
+_preview_builder.add_edge("rewrite_skills", "qa_deduplicate")
+_preview_builder.add_edge("rewrite_summary", "qa_deduplicate")
+_preview_builder.add_edge("rewrite_experience", "qa_deduplicate")
+_preview_builder.add_edge("qa_deduplicate", "score_extract")
+_preview_builder.add_conditional_edges("score_extract", _should_refine, {
+    "refine_rewrite": "refine_rewrite",
+    "compile_pdf": END,  # Stop here — no PDF compilation
+})
+_preview_builder.add_edge("refine_rewrite", "refine_qa")
+_preview_builder.add_edge("refine_qa", END)
+
+_preview_graph = _preview_builder.compile()
+
+
 # ── Public API ────────────────────────────────────────────────────────────
 
 def generate_resume(
@@ -247,3 +282,111 @@ def generate_resume(
         raise
     finally:
         _current_run_id.reset(token)
+
+
+def _make_initial_state(resume_text: str, jd_text: str) -> AgentState:
+    """Build the initial AgentState for any pipeline variant."""
+    return {
+        "resume_text": resume_text,
+        "jd_text": jd_text,
+        "jd_keywords": [],
+        "keyword_categories": {},
+        "resume_sections": {},
+        "gap_analysis": "",
+        "missing_keywords": [],
+        "required_keywords": [],
+        "preferred_keywords": [],
+        "raw_replacements": [],
+        "replacements": [],
+        "ats_score_before": 0,
+        "ats_score": 0,
+        "algorithmic_score": 0.0,
+        "matched_keywords": [],
+        "still_missing_keywords": [],
+        "rewrite_pass": 0,
+        "name": "",
+        "email": None,
+        "phone": None,
+        "linkedin": None,
+        "github": None,
+        "location": None,
+        "summary": None,
+        "skills": [],
+        "experience": [],
+        "education": [],
+        "certifications": [],
+        "resume_file_b64": "",
+        "resume_file_type": "pdf",
+        "compiled_pdf_b64": "",
+    }
+
+
+def preview_resume(resume_text: str, jd_text: str) -> dict:
+    """Run the pipeline WITHOUT compiling a PDF.
+
+    Returns a dict suitable for ``PreviewResponse``: replacements, scores,
+    matched/missing keywords.
+    """
+    logger.info("Starting preview pipeline (no PDF compilation).")
+
+    run_id = create_pipeline_run(resume_text, jd_text)
+    token = _current_run_id.set(run_id)
+
+    initial_state = _make_initial_state(resume_text, jd_text)
+
+    try:
+        final = _preview_graph.invoke(initial_state)
+
+        replacements = final.get("replacements", [])
+        result = {
+            "replacements": replacements,
+            "ats_score_before": final.get("ats_score_before", 0),
+            "ats_score": final.get("ats_score", 0),
+            "matched_keywords": final.get("matched_keywords", []),
+            "still_missing_keywords": final.get("still_missing_keywords", []),
+        }
+
+        complete_pipeline_run(run_id, {
+            "ats_score_before": result["ats_score_before"],
+            "ats_score": result["ats_score"],
+            "matched_keywords": result["matched_keywords"],
+            "replacements_count": len(replacements),
+            "mode": "preview",
+        })
+
+        logger.info("Preview complete: %d replacements, ATS %d→%d.",
+                     len(replacements), result["ats_score_before"], result["ats_score"])
+        return result
+
+    except Exception as exc:
+        fail_pipeline_run(run_id, str(exc))
+        raise
+    finally:
+        _current_run_id.reset(token)
+
+
+def confirm_resume(
+    resume_text: str,
+    replacements: list[dict],
+    resume_file_b64: str,
+    resume_file_type: str = "pdf",
+) -> str:
+    """Apply user-approved replacements and compile the final PDF.
+
+    Returns the base64-encoded rewritten PDF.
+    """
+    from backend.models import TextReplacement as TR
+
+    logger.info("Confirming %d replacements → compiling PDF.", len(replacements))
+
+    typed = [TR(old=r["old"], new=r["new"]) for r in replacements]
+    state: AgentState = _make_initial_state(resume_text, "")
+    state["replacements"] = typed
+    state["resume_file_b64"] = resume_file_b64
+    state["resume_file_type"] = resume_file_type
+
+    result = compile_pdf(state)
+    compiled = result.get("compiled_pdf_b64", "")
+    if not compiled:
+        raise RuntimeError("PDF compilation produced no output.")
+    return compiled

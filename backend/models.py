@@ -81,3 +81,43 @@ class ParsedResumeResponse(BaseModel):
     html: str        # styled HTML preserving fonts, colours, layout
     file_b64: str    # base64-encoded original PDF bytes
     file_type: str   # "pdf"
+
+
+# ── Cover letter & outreach ──────────────────────────────────────────────
+
+class CoverLetterRequest(BaseModel):
+    resume_text: str
+    jd_text: str
+    company_name: Optional[str] = None
+
+
+class CoverLetterResponse(BaseModel):
+    cover_letter: str
+    suggested_job_title: str
+    linkedin_message: str
+
+
+# ── Preview / Confirm two-phase flow ─────────────────────────────────────
+
+class PreviewRequest(BaseModel):
+    resume_text: str
+    jd_text: str
+
+
+class PreviewResponse(BaseModel):
+    replacements: list[TextReplacement]
+    ats_score_before: int
+    ats_score: int
+    matched_keywords: list[str]
+    still_missing_keywords: list[str]
+
+
+class ConfirmRequest(BaseModel):
+    resume_text: str
+    replacements: list[TextReplacement]
+    resume_file_b64: str
+    resume_file_type: str = "pdf"
+
+
+class ConfirmResponse(BaseModel):
+    rewritten_file_b64: str

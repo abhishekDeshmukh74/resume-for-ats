@@ -53,6 +53,156 @@ export async function generateResume(
   return handleResponse<GenerateResponse>(res);
 }
 
+// ── Preview / Confirm (two-phase) ───────────────────────────────────────
+
+export interface TextReplacement {
+  old: string;
+  new: string;
+}
+
+export interface PreviewResponse {
+  replacements: TextReplacement[];
+  ats_score_before: number;
+  ats_score: number;
+  matched_keywords: string[];
+  still_missing_keywords: string[];
+}
+
+export async function previewResume(
+  resume_text: string,
+  jd_text: string,
+): Promise<PreviewResponse> {
+  const res = await fetch(`${BASE}/preview`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resume_text, jd_text }),
+  });
+  return handleResponse<PreviewResponse>(res);
+}
+
+export async function confirmResume(
+  resume_text: string,
+  replacements: TextReplacement[],
+  resume_file_b64: string,
+  resume_file_type: string,
+): Promise<{ rewritten_file_b64: string }> {
+  const res = await fetch(`${BASE}/confirm`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resume_text, replacements, resume_file_b64, resume_file_type }),
+  });
+  return handleResponse<{ rewritten_file_b64: string }>(res);
+}
+
+// ── Cover letter ────────────────────────────────────────────────────────
+
+export interface CoverLetterResponse {
+  cover_letter: string;
+  suggested_job_title: string;
+  linkedin_message: string;
+}
+
+export async function generateCoverLetter(
+  resume_text: string,
+  jd_text: string,
+  company_name?: string,
+): Promise<CoverLetterResponse> {
+  const res = await fetch(`${BASE}/generate-cover-letter`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resume_text, jd_text, company_name }),
+  });
+  return handleResponse<CoverLetterResponse>(res);
+}
+
+// ── SSE streaming ───────────────────────────────────────────────────────
+
+export interface SSEAgentEvent {
+  agent: string;
+  ats_score_before?: number;
+  ats_score?: number;
+  matched_keywords?: string[];
+  still_missing_keywords?: string[];
+  replacements_count?: number;
+  has_pdf?: boolean;
+}
+
+export interface SSECompleteEvent {
+  resume: import('../types/resume').ResumeData;
+  rewritten_file_b64: string;
+}
+
+export function generateResumeStream(
+  resume_text: string,
+  jd_text: string,
+  resume_file_b64: string,
+  resume_file_type: string,
+  callbacks: {
+    onStarted?: (data: { run_id: string }) => void;
+    onAgentComplete?: (data: SSEAgentEvent) => void;
+    onComplete?: (data: SSECompleteEvent) => void;
+    onError?: (detail: string) => void;
+  },
+): AbortController {
+  const controller = new AbortController();
+
+  fetch(`${BASE}/generate-resume-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resume_text, jd_text, resume_file_b64, resume_file_type }),
+    signal: controller.signal,
+  }).then(async (res) => {
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      callbacks.onError?.(err.detail || `HTTP ${res.status}`);
+      return;
+    }
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Parse SSE events from buffer
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const lines = part.split('\n');
+        let eventType = '';
+        let data = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) eventType = line.slice(7);
+          else if (line.startsWith('data: ')) data = line.slice(6);
+        }
+        if (!eventType || !data) continue;
+
+        try {
+          const parsed = JSON.parse(data);
+          switch (eventType) {
+            case 'started': callbacks.onStarted?.(parsed); break;
+            case 'agent_complete': callbacks.onAgentComplete?.(parsed); break;
+            case 'complete': callbacks.onComplete?.(parsed); break;
+            case 'error': callbacks.onError?.(parsed.detail); break;
+          }
+        } catch {
+          // skip malformed events
+        }
+      }
+    }
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      callbacks.onError?.(err.message || 'Stream connection failed');
+    }
+  });
+
+  return controller;
+}
+
 // ── Pipeline runs (for /info page) ──────────────────────────────────────
 
 export interface AgentStep {

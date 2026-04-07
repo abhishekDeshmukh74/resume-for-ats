@@ -1,7 +1,7 @@
 services:
   # ── Backend (FastAPI) ──────────────────────────────────
   - type: web
-    name: pass-ats-api
+    name: resume-for-ats-api
     runtime: docker
     region: oregon
     plan: free
@@ -26,7 +26,7 @@ services:
 
   # ── Frontend (React / Vite) ────────────────────────────
   - type: web
-    name: pass-ats
+    name: resume-for-ats
     runtime: static
     rootDir: frontend
     buildCommand: npm install --legacy-peer-deps && npm run build
@@ -34,7 +34,7 @@ services:
     routes:
       - type: rewrite
         source: /api/*
-        destination: https://pass-ats-api.onrender.com/api/*
+        destination: https://resume-for-ats-api.onrender.com/api/*
     envVars:
       - key: NODE_VERSION
         value: "20"

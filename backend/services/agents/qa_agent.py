@@ -18,6 +18,7 @@ logger = logging.getLogger(__name__)
 # These phrases sound AI-generated and may trigger recruiter suspicion.
 # We replace them with simpler, human-sounding alternatives.
 _AI_PHRASE_REPLACEMENTS: dict[str, str] = {
+    # Action verb inflation (inspired by Resume-Matcher's 100+ list)
     "spearheaded": "led",
     "orchestrated": "coordinated",
     "synergized": "collaborated",
@@ -31,6 +32,36 @@ _AI_PHRASE_REPLACEMENTS: dict[str, str] = {
     "endeavored": "worked",
     "facilitated": "helped",
     "utilized": "used",
+    "championed": "promoted",
+    "streamlined": "improved",
+    "empowered": "enabled",
+    "galvanized": "motivated",
+    "conceptualized": "planned",
+    "ideated": "brainstormed",
+    "instrumentalized": "applied",
+    "actualized": "achieved",
+    "optimized": "improved",
+    "strategized": "planned",
+    "synthesized": "combined",
+    "envisioned": "planned",
+    "instituted": "established",
+    "promulgated": "shared",
+    "evangelized": "advocated",
+    "amplified": "increased",
+    "calibrated": "adjusted",
+    "crystallized": "clarified",
+    "galvanised": "motivated",
+    "helmed": "led",
+    "inaugurated": "started",
+    "matriculated": "enrolled",
+    "proliferated": "expanded",
+    "quarterbacked": "led",
+    "shepherded": "guided",
+    "trailblazed": "started",
+    "alchemized": "transformed",
+    "turbo-charged": "accelerated",
+    "turbocharged": "accelerated",
+    # Buzzword nouns/adjectives
     "synergy": "collaboration",
     "paradigm shift": "change",
     "best-in-class": "top-performing",
@@ -40,6 +71,26 @@ _AI_PHRASE_REPLACEMENTS: dict[str, str] = {
     "game-changing": "innovative",
     "holistic": "comprehensive",
     "actionable": "practical",
+    "disruptive": "innovative",
+    "thought leadership": "expertise",
+    "thought leader": "expert",
+    "deep dive": "analysis",
+    "ecosystem": "environment",
+    "paradigm": "approach",
+    "state-of-the-art": "advanced",
+    "mission-critical": "essential",
+    "next-generation": "advanced",
+    "transformative": "significant",
+    "groundbreaking": "notable",
+    "seamlessly": "smoothly",
+    "robust": "strong",
+    "scalable": "flexible",
+    "unprecedented": "significant",
+    "best of breed": "leading",
+    "core competency": "key skill",
+    "value proposition": "benefit",
+    "low-hanging fruit": "quick win",
+    # Filler phrases
     "in order to": "to",
     "for the purpose of": "to",
     "at the end of the day": "",
@@ -48,13 +99,37 @@ _AI_PHRASE_REPLACEMENTS: dict[str, str] = {
     "on a daily basis": "daily",
     "in a timely manner": "promptly",
     "due to the fact that": "because",
+    "with respect to": "about",
+    "in the context of": "in",
+    "with a view to": "to",
+    "in terms of": "in",
+    "as a means of": "to",
+    "in an effort to": "to",
+    "it is worth noting that": "",
+    "it should be noted that": "",
+    "needless to say": "",
+    "as a matter of fact": "",
+    "in light of the fact that": "because",
+    "by virtue of": "through",
+    "with regard to": "about",
+    "in the event that": "if",
+    "on the grounds that": "because",
 }
 
 
-def _clean_ai_phrases(text: str) -> str:
-    """Replace AI-sounding phrases with simpler alternatives."""
+def _clean_ai_phrases(text: str, jd_text: str = "") -> str:
+    """Replace AI-sounding phrases with simpler alternatives.
+
+    Phrases that appear in the job description are protected — if the JD
+    uses "cutting-edge" or "spearheaded", keep them as-is since the ATS
+    may match on those exact words.
+    """
+    jd_lower = jd_text.lower()
     cleaned = text
     for phrase, replacement in _AI_PHRASE_REPLACEMENTS.items():
+        # Protect phrases that appear in the job description
+        if jd_lower and phrase.lower() in jd_lower:
+            continue
         pattern = re.compile(re.escape(phrase), re.IGNORECASE)
         cleaned = pattern.sub(replacement, cleaned)
     # Clean up double spaces from removals
@@ -123,6 +198,7 @@ def qa_and_deduplicate(state: AgentState) -> dict:
     """Node: validate old text accuracy, remove keyword duplication."""
     raw = state.get("raw_replacements", [])
     keywords = state.get("jd_keywords", [])
+    jd_text = state.get("jd_text", "")
 
     if not raw:
         logger.warning("QA agent: no raw replacements to review.")
@@ -199,8 +275,10 @@ def qa_and_deduplicate(state: AgentState) -> dict:
             continue
         seen_old.add(old)
         new = _enforce_skills_format(old, new)
-        # Clean AI-sounding phrases from new text
-        new = _clean_ai_phrases(new)
+        # Clean AI-sounding phrases from new text (JD-aware: protects phrases in JD)
+        new = _clean_ai_phrases(new, jd_text)
+        # Master alignment: reject replacements that fabricate companies or dates
+        new = _guard_master_alignment(old, new, state["resume_text"])
         if old == new:
             continue
         final.append(TextReplacement(old=old, new=new))
@@ -208,3 +286,43 @@ def qa_and_deduplicate(state: AgentState) -> dict:
     logger.info("QA agent: %d → %d final replacements.", len(raw), len(final))
 
     return {"replacements": final}
+
+
+# ── Master-resume alignment guard (inspired by Resume-Matcher) ───────────
+
+_COMPANY_RE = re.compile(
+    r"\b(?:at|@)\s+([A-Z][A-Za-z0-9& .-]{1,40})\b"
+)
+_DATE_RE = re.compile(
+    r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\.?\s+\d{4}\b"
+    r"|\b\d{4}\s*[-–—]\s*(?:Present|\d{4})\b",
+    re.IGNORECASE,
+)
+
+
+def _guard_master_alignment(old: str, new: str, resume_text: str) -> str:
+    """Prevent the LLM from fabricating company names or altering dates.
+
+    If the new text introduces company names not in the original resume, or
+    changes date ranges, fall back to the original text for those segments.
+    Inspired by Resume-Matcher's 4-gate diff validation.
+    """
+    # Check for fabricated company references
+    original_companies = {m.group(1).strip().lower() for m in _COMPANY_RE.finditer(resume_text)}
+    new_companies = {m.group(1).strip().lower() for m in _COMPANY_RE.finditer(new)}
+    fabricated = new_companies - original_companies
+    if fabricated:
+        logger.warning("QA alignment: blocked fabricated company refs: %s", fabricated)
+        return old  # Reject the entire replacement
+
+    # Check for altered dates — dates in "new" must exist in "old" or resume
+    old_dates = set(_DATE_RE.findall(old))
+    resume_dates = set(_DATE_RE.findall(resume_text))
+    allowed_dates = old_dates | resume_dates
+    new_dates = set(_DATE_RE.findall(new))
+    fabricated_dates = new_dates - allowed_dates
+    if fabricated_dates:
+        logger.warning("QA alignment: blocked fabricated dates: %s", fabricated_dates)
+        return old  # Reject the entire replacement
+
+    return new

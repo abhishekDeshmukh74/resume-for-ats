@@ -1,4 +1,4 @@
-# Pass-ATS Frontend
+# Resume for ATS Frontend
 
 React + TypeScript SPA that drives the 4-step resume tailoring workflow, with a dedicated pipeline runs inspector page.
 

@@ -25,9 +25,9 @@ def _configure_logging() -> None:
 
 _configure_logging()
 
-from backend.routers import resume, jd, generate, pipeline  # noqa: E402
+from backend.routers import resume, jd, generate, pipeline, stream  # noqa: E402
 
-app = FastAPI(title="pass-ats API", version="1.0.0")
+app = FastAPI(title="Resume for ATS API", version="1.0.0")
 
 origins = os.getenv("ALLOWED_ORIGINS").split(",")
 
@@ -43,6 +43,7 @@ app.include_router(resume.router, prefix="/api")
 app.include_router(jd.router, prefix="/api")
 app.include_router(generate.router, prefix="/api")
 app.include_router(pipeline.router, prefix="/api")
+app.include_router(stream.router, prefix="/api")
 
 
 @app.get("/api/health")

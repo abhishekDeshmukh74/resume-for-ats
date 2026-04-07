@@ -6,9 +6,92 @@ import json
 import logging
 import os
 import re
+import time
 
-from langchain_groq import ChatGroq
-from langchain_google_genai import ChatGoogleGenerativeAI
+import litellm
+
+# Silence litellm's verbose logging unless explicitly enabled
+litellm.suppress_debug_info = True
+
+# ---------------------------------------------------------------------------
+# Thin LangChain-compatible wrapper around litellm.completion()
+# ---------------------------------------------------------------------------
+
+
+class _LLMResponse:
+    """Minimal response object matching LangChain's AIMessage interface."""
+
+    __slots__ = ("content",)
+
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _LiteLLMChat:
+    """Drop-in replacement for LangChain ChatGroq/ChatGemini/ChatOllama.
+
+    Only the ``.invoke(messages)`` method is implemented — that's all the
+    pipeline ever calls.
+    """
+
+    def __init__(
+        self,
+        model: str,
+        *,
+        api_key: str | None = None,
+        api_base: str | None = None,
+        temperature: float = 0.2,
+        max_tokens: int = 8192,
+        num_retries: int = 2,
+        **extra,
+    ):
+        self.model = model
+        self.api_key = api_key
+        self.api_base = api_base
+        self.temperature = temperature
+        self.max_tokens = max_tokens
+        self.num_retries = num_retries
+        self.extra = extra
+
+    def invoke(self, messages):
+        msgs = []
+        for m in messages:
+            if isinstance(m, dict):
+                msgs.append({"role": m["role"], "content": m["content"]})
+            else:
+                # LangChain message objects
+                msgs.append({"role": getattr(m, "type", "user"), "content": m.content})
+        response = litellm.completion(
+            model=self.model,
+            messages=msgs,
+            api_key=self.api_key,
+            api_base=self.api_base,
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            num_retries=self.num_retries,
+            **self.extra,
+        )
+        return _LLMResponse(response.choices[0].message.content)
+
+    def with_fallbacks(self, others: list[_LiteLLMChat]) -> _LiteLLMChatWithFallbacks:
+        return _LiteLLMChatWithFallbacks(self, others)
+
+
+class _LiteLLMChatWithFallbacks:
+    """Try primary LLM, then fall through to alternatives on any error."""
+
+    def __init__(self, primary: _LiteLLMChat, fallbacks: list[_LiteLLMChat]):
+        self._chain = [primary, *fallbacks]
+
+    def invoke(self, messages):
+        last_exc: Exception | None = None
+        for llm in self._chain:
+            try:
+                return llm.invoke(messages)
+            except Exception as exc:
+                last_exc = exc
+                _logger.warning("LiteLLM fallback: %s failed (%s), trying next.", llm.model, exc)
+        raise RuntimeError(f"All LLM fallbacks exhausted: {last_exc}") from last_exc
 
 # ---------------------------------------------------------------------------
 # Prompt-injection sanitisation
@@ -116,8 +199,6 @@ def invoke_llm_json(messages: list, *, retries: int = 2) -> dict:
     Retries up to *retries* times (with brief exponential back-off) when the
     model returns empty or unparseable content.
     """
-    import time
-
     llm = get_llm()
     last_exc: Exception | None = None
     for attempt in range(1 + retries):
@@ -158,6 +239,89 @@ def _get_groq_api_keys() -> list[str]:
     )
 
 
+# ── Provider-to-LiteLLM model mapping ────────────────────────────────────
+# Each provider function returns a _LiteLLMChat (or fallbacks wrapper).
+
+def _build_groq_llm() -> _LiteLLMChat | _LiteLLMChatWithFallbacks:
+    keys = _get_groq_api_keys()
+    model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    litellm_model = f"groq/{model}"
+    _logger.info("Initialising LiteLLM (Groq) with %d API key(s), model=%s", len(keys), litellm_model)
+    llms = [
+        _LiteLLMChat(litellm_model, api_key=key)
+        for key in keys
+    ]
+    return llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
+
+
+def _build_gemini_llm() -> _LiteLLMChat:
+    api_key = os.environ.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.0-flash")
+    litellm_model = f"gemini/{model}"
+    _logger.info("Initialising LiteLLM (Gemini): model=%s", litellm_model)
+    return _LiteLLMChat(litellm_model, api_key=api_key)
+
+
+def _build_ollama_llm() -> _LiteLLMChat:
+    base_url = os.environ.get("OLLAMA_BASE_URL", "http://localhost:11434")
+    model = os.environ.get("OLLAMA_MODEL", "llama3.1")
+    litellm_model = f"ollama/{model}"
+    _logger.info("Initialising LiteLLM (Ollama): model=%s base_url=%s", litellm_model, base_url)
+    return _LiteLLMChat(litellm_model, api_base=base_url)
+
+
+def _build_openai_llm() -> _LiteLLMChat:
+    api_key = os.environ.get("OPENAI_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENAI_API_KEY environment variable is not set.")
+    model = os.environ.get("OPENAI_MODEL", "gpt-4o")
+    _logger.info("Initialising LiteLLM (OpenAI): model=%s", model)
+    return _LiteLLMChat(model, api_key=api_key)
+
+
+def _build_anthropic_llm() -> _LiteLLMChat:
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if not api_key:
+        raise RuntimeError("ANTHROPIC_API_KEY environment variable is not set.")
+    model = os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-20250514")
+    litellm_model = f"anthropic/{model}"
+    _logger.info("Initialising LiteLLM (Anthropic): model=%s", litellm_model)
+    return _LiteLLMChat(litellm_model, api_key=api_key)
+
+
+def _build_deepseek_llm() -> _LiteLLMChat:
+    api_key = os.environ.get("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY environment variable is not set.")
+    model = os.environ.get("DEEPSEEK_MODEL", "deepseek-chat")
+    litellm_model = f"deepseek/{model}"
+    _logger.info("Initialising LiteLLM (DeepSeek): model=%s", litellm_model)
+    return _LiteLLMChat(litellm_model, api_key=api_key)
+
+
+def _build_openrouter_llm() -> _LiteLLMChat:
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError("OPENROUTER_API_KEY environment variable is not set.")
+    model = os.environ.get("OPENROUTER_MODEL", "meta-llama/llama-3-70b")
+    litellm_model = f"openrouter/{model}"
+    _logger.info("Initialising LiteLLM (OpenRouter): model=%s", litellm_model)
+    return _LiteLLMChat(litellm_model, api_key=api_key)
+
+
+_PROVIDER_BUILDERS = {
+    "groq": _build_groq_llm,
+    "gemini": _build_gemini_llm,
+    "ollama": _build_ollama_llm,
+    "openai": _build_openai_llm,
+    "anthropic": _build_anthropic_llm,
+    "deepseek": _build_deepseek_llm,
+    "openrouter": _build_openrouter_llm,
+}
+
+
 def get_llm():
     global _llm_instance
     if _llm_instance is not None:
@@ -165,28 +329,12 @@ def get_llm():
 
     provider = os.environ.get("LLM_PROVIDER", "groq").lower()
 
-    if provider == "gemini":
-        api_key = os.environ.get("GEMINI_API_KEY")
-        if not api_key:
-            raise RuntimeError("GEMINI_API_KEY environment variable is not set.")
-        _llm_instance = ChatGoogleGenerativeAI(
-            model=os.environ.get("GEMINI_MODEL", "gemini-2.0-flash"),
-            google_api_key=api_key,
-            temperature=0.2,
-            max_output_tokens=8192,
+    builder = _PROVIDER_BUILDERS.get(provider)
+    if builder is None:
+        raise RuntimeError(
+            f"Unknown LLM_PROVIDER={provider!r}. "
+            f"Supported: {', '.join(sorted(_PROVIDER_BUILDERS))}"
         )
-        return _llm_instance
 
-    # Default: groq — build one ChatGroq per API key and chain as fallbacks
-    keys = _get_groq_api_keys()
-    model = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
-    _logger.info("Initialising Groq LLM with %d API key(s)", len(keys))
-
-    llms = [
-        ChatGroq(model=model, api_key=key, temperature=0.2, max_tokens=8192)
-        for key in keys
-    ]
-
-    # with_fallbacks automatically tries next LLM on any error (incl. rate-limit)
-    _llm_instance = llms[0].with_fallbacks(llms[1:]) if len(llms) > 1 else llms[0]
+    _llm_instance = builder()
     return _llm_instance

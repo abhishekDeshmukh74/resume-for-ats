@@ -8,8 +8,7 @@ pydantic==2.12.5
 pydantic-settings==2.13.1
 python-dotenv==1.2.2
 langgraph==1.0.10
-langchain-groq==1.1.2
-langchain-google-genai==4.0.0
+litellm>=1.40.0
 langchain-core==1.2.18
 pymongo[srv]==4.12.1
 python-json-logger==3.3.0
