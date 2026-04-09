@@ -365,6 +365,59 @@ def preview_resume(resume_text: str, jd_text: str) -> dict:
         _current_run_id.reset(token)
 
 
+def stream_preview_resume(resume_text: str, jd_text: str):
+    """Generator that yields (event_type, data) tuples as each preview-pipeline
+    agent completes.  Call this from an SSE endpoint."""
+    run_id = create_pipeline_run(resume_text, jd_text)
+    token = _current_run_id.set(run_id)
+    initial_state = _make_initial_state(resume_text, jd_text)
+    accumulated: dict = dict(initial_state)
+
+    try:
+        for event in _preview_graph.stream(initial_state, stream_mode="updates"):
+            for node_name, update in event.items():
+                accumulated.update(update)
+
+                progress: dict = {"agent": node_name}
+                if node_name == "score_before":
+                    progress["ats_score_before"] = update.get("ats_score_before", 0)
+                elif node_name == "score_extract":
+                    progress["ats_score"] = update.get("ats_score", 0)
+                    progress["matched_keywords"] = update.get("matched_keywords", [])
+                    progress["still_missing_keywords"] = update.get("still_missing_keywords", [])
+                elif node_name in ("rewrite_skills", "rewrite_summary", "rewrite_experience"):
+                    progress["replacements_count"] = len(update.get("raw_replacements", []))
+                elif node_name == "qa_deduplicate":
+                    progress["replacements_count"] = len(update.get("replacements", []))
+
+                yield ("agent_complete", progress)
+
+        replacements = accumulated.get("replacements", [])
+        result = {
+            "replacements": replacements,
+            "ats_score_before": accumulated.get("ats_score_before", 0),
+            "ats_score": accumulated.get("ats_score", 0),
+            "matched_keywords": accumulated.get("matched_keywords", []),
+            "still_missing_keywords": accumulated.get("still_missing_keywords", []),
+        }
+        complete_pipeline_run(run_id, {
+            "ats_score_before": result["ats_score_before"],
+            "ats_score": result["ats_score"],
+            "matched_keywords": result["matched_keywords"],
+            "replacements_count": len(replacements),
+            "mode": "preview",
+        })
+        logger.info("Preview stream complete: %d replacements, ATS %d→%d.",
+                     len(replacements), result["ats_score_before"], result["ats_score"])
+        yield ("complete", result)
+
+    except Exception as exc:
+        fail_pipeline_run(run_id, str(exc))
+        yield ("error", {"detail": str(exc)})
+    finally:
+        _current_run_id.reset(token)
+
+
 def confirm_resume(
     resume_text: str,
     replacements: list[dict],

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react';
-import { getPipelineRuns, getPipelineRun, getPipelineRunPdfUrl } from '../api/client';
+import { useEffect, useState, useCallback } from 'react';
+import { getPipelineRuns, getPipelineRun, getPipelineRunPdfUrl, getPipelineRunsStatus } from '../api/client';
 import type { PipelineRun, AgentStep } from '../api/client';
 import { Link } from 'react-router-dom';
 
@@ -309,15 +309,23 @@ const InfoPage = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [dbConnected, setDbConnected] = useState<boolean | null>(null);
+
+  const fetchRuns = useCallback(() => {
+    setLoading(true);
+    setError(null);
+    Promise.all([getPipelineRuns(), getPipelineRunsStatus()])
+      .then(([data, status]) => {
+        setRuns(data);
+        setDbConnected(status.db_connected);
+      })
+      .catch((e) => setError(e.message))
+      .finally(() => setLoading(false));
+  }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    getPipelineRuns()
-      .then((data) => { if (!cancelled) setRuns(data); })
-      .catch((e) => { if (!cancelled) setError(e.message); })
-      .finally(() => { if (!cancelled) setLoading(false); });
-    return () => { cancelled = true; };
-  }, []);
+    fetchRuns();
+  }, [fetchRuns]);
 
   if (selectedId) {
     return (
@@ -338,13 +346,30 @@ const InfoPage = () => {
       <main className="flex-1 flex flex-col items-center py-10 px-4">
         <div className="w-full max-w-3xl space-y-6">
           <div className="flex items-center justify-between">
-            <h1 className="text-2xl font-bold text-gray-800">Pipeline Runs</h1>
-            <Link
-              to="/"
-              className="text-sm text-blue-600 hover:underline"
-            >
-              &larr; Back to app
-            </Link>
+            <div className="flex items-center gap-3">
+              <h1 className="text-2xl font-bold text-gray-800">Pipeline Runs</h1>
+              {dbConnected !== null && (
+                <span className={`text-xs font-semibold px-2 py-0.5 rounded-full border ${
+                  dbConnected
+                    ? 'bg-green-100 text-green-700 border-green-300'
+                    : 'bg-red-100 text-red-600 border-red-300'
+                }`}>
+                  {dbConnected ? 'DB connected' : 'DB not connected'}
+                </span>
+              )}
+            </div>
+            <div className="flex items-center gap-3">
+              <button
+                onClick={fetchRuns}
+                disabled={loading}
+                className="text-sm text-blue-600 hover:underline disabled:opacity-50"
+              >
+                Refresh
+              </button>
+              <Link to="/" className="text-sm text-blue-600 hover:underline">
+                &larr; Back to app
+              </Link>
+            </div>
           </div>
 
           {loading && (
@@ -358,8 +383,16 @@ const InfoPage = () => {
           )}
 
           {!loading && !error && runs.length === 0 && (
-            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 text-center text-gray-400">
-              No pipeline runs yet. Generate a resume to see agent I/O here.
+            <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-10 text-center space-y-2">
+              <p className="text-gray-500">No pipeline runs yet.</p>
+              {dbConnected === false && (
+                <p className="text-xs text-red-500">
+                  MongoDB is not connected — set <code className="bg-red-50 px-1 rounded">MONGODB_URL</code> in your <code className="bg-red-50 px-1 rounded">.env</code> to enable run tracking.
+                </p>
+              )}
+              {dbConnected === true && (
+                <p className="text-xs text-gray-400">Generate a resume to see agent I/O here.</p>
+              )}
             </div>
           )}
 

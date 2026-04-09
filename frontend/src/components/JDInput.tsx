@@ -41,7 +41,11 @@ const JDInput = ({ onDone, onPreview }: JDInputProps) => {
     setLoading(true);
     try {
       const { text } = await scrapeJd(url.trim());
-      onDone(text);
+      if (onPreview) {
+        onPreview(text);
+      } else {
+        onDone(text);
+      }
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : 'Failed to scrape URL.');
     } finally {
@@ -78,28 +82,27 @@ const JDInput = ({ onDone, onPreview }: JDInputProps) => {
             value={pasteText}
             onChange={(e) => setPasteText(e.target.value)}
           />
-          <div className="flex gap-2">
+          {onPreview ? (
+            <button
+              onClick={() => {
+                if (!pasteText.trim()) {
+                  setError('Please paste the job description text.');
+                  return;
+                }
+                onPreview(pasteText.trim());
+              }}
+              className="w-full py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
+            >
+              Preview Changes
+            </button>
+          ) : (
             <button
               onClick={handlePasteSubmit}
-              className="flex-1 py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
+              className="w-full py-2.5 rounded-xl bg-blue-600 text-white text-sm font-semibold hover:bg-blue-700 transition-colors"
             >
-              Generate
+              Continue
             </button>
-            {onPreview && (
-              <button
-                onClick={() => {
-                  if (!pasteText.trim()) {
-                    setError('Please paste the job description text.');
-                    return;
-                  }
-                  onPreview(pasteText.trim());
-                }}
-                className="flex-1 py-2.5 rounded-xl border border-purple-300 text-purple-600 text-sm font-semibold hover:bg-purple-50 transition-colors"
-              >
-                Preview Changes
-              </button>
-            )}
-          </div>
+          )}
         </div>
       )}
 
@@ -121,7 +124,7 @@ const JDInput = ({ onDone, onPreview }: JDInputProps) => {
             {loading && (
               <div className="w-4 h-4 border-2 border-white/40 border-t-white rounded-full animate-spin" />
             )}
-            {loading ? 'Fetching JD…' : 'Fetch & Continue'}
+            {loading ? 'Fetching JD…' : 'Fetch & Preview'}
           </button>
         </div>
       )}

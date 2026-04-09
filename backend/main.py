@@ -29,7 +29,8 @@ from backend.routers import resume, jd, generate, pipeline, stream  # noqa: E402
 
 app = FastAPI(title="Resume for ATS API", version="1.0.0")
 
-origins = os.getenv("ALLOWED_ORIGINS").split(",")
+_origins_raw = os.getenv("ALLOWED_ORIGINS", "http://localhost:5173")
+origins = [o.strip() for o in _origins_raw.replace(";", ",").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,

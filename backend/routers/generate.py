@@ -1,6 +1,8 @@
 import base64
+import json
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from backend.models import (
     GenerateRequest, GenerateResponse,
     CoverLetterRequest, CoverLetterResponse,
@@ -8,7 +10,7 @@ from backend.models import (
     ConfirmRequest, ConfirmResponse,
 )
 from backend.services.agents import generate_resume
-from backend.services.agents.graph import preview_resume, confirm_resume
+from backend.services.agents.graph import preview_resume, confirm_resume, stream_preview_resume
 from backend.services.agents.cover_letter import generate_cover_letter
 
 router = APIRouter()
@@ -80,6 +82,30 @@ async def preview_endpoint(body: PreviewRequest):
         ) from exc
 
     return PreviewResponse(**result)
+
+
+@router.post("/preview-stream")
+async def preview_stream_endpoint(body: PreviewRequest):
+    """SSE endpoint — streams per-agent progress events for the preview pipeline."""
+    if not body.resume_text.strip():
+        raise HTTPException(status_code=400, detail="resume_text cannot be empty.")
+    if not body.jd_text.strip():
+        raise HTTPException(status_code=400, detail="jd_text cannot be empty.")
+
+    def _generate():
+        for event_type, data in stream_preview_resume(body.resume_text, body.jd_text):
+            payload = json.dumps(data, default=str)
+            yield f"event: {event_type}\ndata: {payload}\n\n"
+
+    return StreamingResponse(
+        _generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @router.post("/confirm", response_model=ConfirmResponse)

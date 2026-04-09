@@ -203,6 +203,73 @@ export function generateResumeStream(
   return controller;
 }
 
+// ── Preview SSE streaming ───────────────────────────────────────────────
+
+export function previewResumeStream(
+  resume_text: string,
+  jd_text: string,
+  callbacks: {
+    onAgentComplete?: (data: SSEAgentEvent) => void;
+    onComplete?: (data: PreviewResponse) => void;
+    onError?: (detail: string) => void;
+  },
+): AbortController {
+  const controller = new AbortController();
+
+  fetch(`${BASE}/preview-stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resume_text, jd_text }),
+    signal: controller.signal,
+  }).then(async (res) => {
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({ detail: `HTTP ${res.status}` }));
+      callbacks.onError?.(err.detail || `HTTP ${res.status}`);
+      return;
+    }
+
+    const reader = res.body!.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || '';
+
+      for (const part of parts) {
+        const lines = part.split('\n');
+        let eventType = '';
+        let data = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) eventType = line.slice(7);
+          else if (line.startsWith('data: ')) data = line.slice(6);
+        }
+        if (!eventType || !data) continue;
+        try {
+          const parsed = JSON.parse(data);
+          switch (eventType) {
+            case 'agent_complete': callbacks.onAgentComplete?.(parsed); break;
+            case 'complete': callbacks.onComplete?.(parsed); break;
+            case 'error': callbacks.onError?.(parsed.detail || 'Preview failed'); break;
+          }
+        } catch {
+          // skip malformed events
+        }
+      }
+    }
+  }).catch((err) => {
+    if (err.name !== 'AbortError') {
+      callbacks.onError?.(err.message || 'Preview stream connection failed');
+    }
+  });
+
+  return controller;
+}
+
 // ── Pipeline runs (for /info page) ──────────────────────────────────────
 
 export interface AgentStep {
@@ -229,6 +296,11 @@ export interface PipelineRun {
   };
   has_compiled_pdf?: boolean;
   error?: string;
+}
+
+export async function getPipelineRunsStatus(): Promise<{ db_connected: boolean }> {
+  const res = await fetch(`${BASE}/pipeline-runs/status`);
+  return handleResponse<{ db_connected: boolean }>(res);
 }
 
 export async function getPipelineRuns(limit = 20, skip = 0): Promise<PipelineRun[]> {

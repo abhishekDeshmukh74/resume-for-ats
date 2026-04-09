@@ -9,17 +9,13 @@ import CoverLetterPanel from './components/CoverLetterPanel';
 import InfoPage from './pages/InfoPage';
 import {
   generateResumeStream,
-  previewResume,
+  previewResumeStream,
   confirmResume,
-  type SSEAgentEvent,
   type TextReplacement,
-  type PreviewResponse,
 } from './api/client';
-import type { ResumeData } from './types/resume';
+import { useAppStore } from './store/appStore';
 
 const STEPS = ['Upload Resume', 'Job Description', 'Generate', 'Review', 'Preview'];
-
-type Step = 1 | 2 | 3 | 4 | 5;
 
 const AGENT_LABELS: Record<string, string> = {
   extract_keywords: 'Extracting JD keywords',
@@ -45,55 +41,63 @@ const App = () => {
 };
 
 const HomePage = () => {
-  const [step, setStep] = useState<Step>(1);
-  const [resumeText, setResumeText] = useState('');
-  const [jdText, setJdText] = useState('');
-  const [resumeFileB64, setResumeFileB64] = useState('');
-  const [resumeFileType, setResumeFileType] = useState('pdf');
-  const [resumeFileName, setResumeFileName] = useState('');
-  const [generatedResume, setGeneratedResume] = useState<ResumeData | null>(null);
-  const [rewrittenFileB64, setRewrittenFileB64] = useState('');
-  const [genError, setGenError] = useState<string | null>(null);
+  const {
+    step,
+    resumeText,
+    jdText,
+    resumeFileB64,
+    resumeFileType,
+    resumeFileName,
+    generatedResume,
+    rewrittenFileB64,
+    completedAgents,
+    currentAgent,
+    previewData,
+    genError,
+    setStep,
+    setResumeUploaded,
+    setJdText,
+    setGenerating,
+    addCompletedAgent,
+    setCurrentAgent,
+    setComplete,
+    setPreviewData,
+    setGenError,
+    setConfirmResult,
+    reset,
+  } = useAppStore();
 
-  // SSE streaming state
-  const [completedAgents, setCompletedAgents] = useState<SSEAgentEvent[]>([]);
-  const [currentAgent, setCurrentAgent] = useState<string | null>(null);
-  const abortRef = useRef<AbortController | null>(null);
-
-  // Preview/confirm state
-  const [previewData, setPreviewData] = useState<PreviewResponse | null>(null);
+  // Transient loading flags — not persisted
   const [previewLoading, setPreviewLoading] = useState(false);
   const [confirmLoading, setConfirmLoading] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
+
+  // Which steps the user can jump to directly
+  const accessibleSteps: number[] = [1];
+  if (resumeText) accessibleSteps.push(2);
+  if (previewData) accessibleSteps.push(4);
+  if (generatedResume) accessibleSteps.push(5);
+
+  const handleStepClick = (s: number) => {
+    if (accessibleSteps.includes(s) && s !== step) {
+      abortRef.current?.abort();
+      setStep(s as 1 | 2 | 3 | 4 | 5);
+    }
+  };
 
   const handleResumeUploaded = (text: string, fileB64?: string, fileType?: string, fileName?: string) => {
-    setResumeText(text);
-    setResumeFileB64(fileB64 ?? '');
-    setResumeFileType(fileType ?? 'pdf');
-    setResumeFileName(fileName ?? '');
-    setStep(2);
+    setResumeUploaded(text, fileB64 ?? '', fileType ?? 'pdf', fileName ?? '');
   };
 
   const handleJdReady = useCallback(async (jd: string) => {
-    setGenError(null);
     setJdText(jd);
-    setCompletedAgents([]);
-    setCurrentAgent(null);
-    setStep(3);
+    setGenerating();
 
-    // Use SSE streaming for live progress
     abortRef.current = generateResumeStream(
       resumeText, jd, resumeFileB64, resumeFileType,
       {
-        onAgentComplete: (evt) => {
-          setCompletedAgents((prev) => [...prev, evt]);
-          setCurrentAgent(evt.agent);
-        },
-        onComplete: (data) => {
-          setGeneratedResume(data.resume);
-          setRewrittenFileB64(data.rewritten_file_b64);
-          setCurrentAgent(null);
-          setStep(5);
-        },
+        onAgentComplete: (evt) => addCompletedAgent(evt),
+        onComplete: (data) => setComplete(data.resume, data.rewritten_file_b64),
         onError: (detail) => {
           setGenError(detail);
           setCurrentAgent(null);
@@ -101,25 +105,32 @@ const HomePage = () => {
         },
       },
     );
-  }, [resumeText, resumeFileB64, resumeFileType]);
+  }, [resumeText, resumeFileB64, resumeFileType, setJdText, setGenerating, addCompletedAgent, setComplete, setGenError, setCurrentAgent, setStep]);
 
-  const handlePreviewFlow = useCallback(async (jd: string) => {
+  const handlePreviewFlow = useCallback((jd: string) => {
     setGenError(null);
     setJdText(jd);
+    setGenerating(); // clears completedAgents, sets step 3
     setPreviewLoading(true);
-    setStep(3);
 
-    try {
-      const data = await previewResume(resumeText, jd);
-      setPreviewData(data);
-      setStep(4);
-    } catch (e: unknown) {
-      setGenError(e instanceof Error ? e.message : 'Preview failed.');
-      setStep(2);
-    } finally {
-      setPreviewLoading(false);
-    }
-  }, [resumeText]);
+    abortRef.current?.abort();
+    abortRef.current = previewResumeStream(
+      resumeText, jd,
+      {
+        onAgentComplete: (evt) => addCompletedAgent(evt),
+        onComplete: (data) => {
+          setPreviewLoading(false);
+          setPreviewData(data);
+        },
+        onError: (detail) => {
+          setPreviewLoading(false);
+          setGenError(detail);
+          setCurrentAgent(null);
+          setStep(2);
+        },
+      },
+    );
+  }, [resumeText, setGenError, setJdText, setGenerating, addCompletedAgent, setPreviewData, setCurrentAgent, setStep]);
 
   const handleConfirm = useCallback(async (approved: TextReplacement[]) => {
     setConfirmLoading(true);
@@ -127,40 +138,29 @@ const HomePage = () => {
       const { rewritten_file_b64 } = await confirmResume(
         resumeText, approved, resumeFileB64, resumeFileType,
       );
-      setRewrittenFileB64(rewritten_file_b64);
-      // Build a minimal ResumeData from preview data
-      setGeneratedResume({
-        name: '',
-        skills: [],
-        experience: [],
-        education: [],
-        certifications: [],
-        ats_score_before: previewData?.ats_score_before ?? 0,
-        ats_score: previewData?.ats_score ?? 0,
-        matched_keywords: previewData?.matched_keywords ?? [],
-      });
-      setStep(5);
+      setConfirmResult(
+        {
+          name: '',
+          skills: [],
+          experience: [],
+          education: [],
+          certifications: [],
+          ats_score_before: previewData?.ats_score_before ?? 0,
+          ats_score: previewData?.ats_score ?? 0,
+          matched_keywords: previewData?.matched_keywords ?? [],
+        },
+        rewritten_file_b64,
+      );
     } catch (e: unknown) {
       setGenError(e instanceof Error ? e.message : 'Compilation failed.');
     } finally {
       setConfirmLoading(false);
     }
-  }, [resumeText, resumeFileB64, resumeFileType, previewData]);
+  }, [resumeText, resumeFileB64, resumeFileType, previewData, setConfirmResult, setGenError]);
 
   const handleStartOver = () => {
     abortRef.current?.abort();
-    setStep(1);
-    setResumeText('');
-    setJdText('');
-    setResumeFileB64('');
-    setResumeFileType('pdf');
-    setResumeFileName('');
-    setGeneratedResume(null);
-    setRewrittenFileB64('');
-    setGenError(null);
-    setCompletedAgents([]);
-    setCurrentAgent(null);
-    setPreviewData(null);
+    reset();
   };
 
   return (
@@ -182,7 +182,12 @@ const HomePage = () => {
 
       <main className="flex-1 flex flex-col items-center py-10 px-4">
         <div className="w-full max-w-2xl">
-          <StepIndicator currentStep={step} steps={STEPS} />
+          <StepIndicator
+            currentStep={step}
+            steps={STEPS}
+            accessibleSteps={accessibleSteps}
+            onStepClick={handleStepClick}
+          />
 
           <div className="bg-white rounded-2xl shadow-sm border border-gray-200 p-8">
             {step === 1 && <ResumeUpload onDone={handleResumeUploaded} />}
@@ -221,10 +226,13 @@ const HomePage = () => {
                         </svg>
                         <span>{AGENT_LABELS[evt.agent] || evt.agent}</span>
                         {evt.ats_score_before != null && (
-                          <span className="text-gray-500 text-xs">({evt.ats_score_before}%)</span>
+                          <span className="text-gray-500 text-xs">ATS before: {evt.ats_score_before}%</span>
                         )}
                         {evt.ats_score != null && (
-                          <span className="text-blue-600 text-xs font-semibold">({evt.ats_score}%)</span>
+                          <span className="text-blue-600 text-xs font-semibold">ATS: {evt.ats_score}%</span>
+                        )}
+                        {evt.replacements_count != null && (
+                          <span className="text-gray-500 text-xs">{evt.replacements_count} replacement{evt.replacements_count !== 1 ? 's' : ''}</span>
                         )}
                       </div>
                     ))}

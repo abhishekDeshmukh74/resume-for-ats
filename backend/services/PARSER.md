@@ -29,7 +29,7 @@ Instead of using `page.get_text("html")` (which can produce inconsistent styling
 
 ## Critical: Text Representation Consistency
 
-The plain text returned here is sent to the multi-agent pipeline, where Agent 4 (Rewriter) must return **verbatim substrings** of it as `old` values in the replacements array. Agent 5 (QA) validates these substrings exist. The rewriter service (`rewriter.py`) then uses `page.search_for()` to locate these `old` strings in the PDF.
+The plain text returned here is sent to the multi-agent pipeline, where Agents 4a/4b/4c (Skills, Summary, Experience Rewriters) must return **verbatim substrings** of it as `old` values in the replacements array. Agent 5 (QA) validates these substrings exist. The rewriter service (`rewriter.py`) then uses `page.search_for()` to locate these `old` strings in the PDF.
 
 ## Returns
 

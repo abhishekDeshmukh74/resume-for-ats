@@ -98,7 +98,7 @@ const DiffPreview = ({
         <div className="max-h-[50vh] overflow-y-auto space-y-3 pr-1">
           {replacements.map((r, i) => (
             <div key={i} className={`rounded-xl border p-3 transition-colors ${checked[i] ? 'border-blue-200 bg-blue-50/30' : 'border-gray-200 bg-gray-50/50 opacity-60'}`}>
-              <label className="flex items-start gap-2 cursor-pointer">
+              <div className="flex items-start gap-2">
                 <input
                   type="checkbox"
                   checked={checked[i]}
@@ -107,7 +107,7 @@ const DiffPreview = ({
                     next[i] = e.target.checked;
                     setChecked(next);
                   }}
-                  className="mt-1 rounded"
+                  className="mt-1 rounded cursor-pointer"
                 />
                 <div className="flex-1 min-w-0 space-y-2 text-sm">
                   <div>
@@ -117,18 +117,25 @@ const DiffPreview = ({
                   <div>
                     <span className="text-xs font-semibold text-green-600 uppercase">New</span>
                     <textarea
+                      ref={(el) => {
+                        if (el) {
+                          el.style.height = 'auto';
+                          el.style.height = `${el.scrollHeight}px`;
+                        }
+                      }}
                       value={edits[i]}
                       onChange={(e) => {
+                        e.target.style.height = 'auto';
+                        e.target.style.height = `${e.target.scrollHeight}px`;
                         const next = [...edits];
                         next[i] = e.target.value;
                         setEdits(next);
                       }}
-                      rows={Math.max(2, edits[i].split('\n').length)}
-                      className="w-full bg-green-50 border border-green-100 rounded-lg px-2 py-1 text-green-800 text-sm resize-none focus:outline-none focus:ring-1 focus:ring-green-400"
+                      className="w-full bg-green-50 border border-green-100 rounded-lg px-2 py-1 text-green-800 text-sm resize-none overflow-hidden focus:outline-none focus:ring-1 focus:ring-green-400"
                     />
                   </div>
                 </div>
-              </label>
+              </div>
             </div>
           ))}
         </div>

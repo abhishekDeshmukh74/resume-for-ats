@@ -2,9 +2,16 @@
 
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
-from backend.services.db import get_pipeline_runs, get_pipeline_run, get_compiled_pdf
+from backend.services.db import get_pipeline_runs, get_pipeline_run, get_compiled_pdf, _get_db
 
 router = APIRouter()
+
+
+@router.get("/pipeline-runs/status")
+def pipeline_runs_status():
+    """Return whether the pipeline run DB is connected."""
+    db = _get_db()
+    return {"db_connected": db is not None}
 
 
 @router.get("/pipeline-runs")
