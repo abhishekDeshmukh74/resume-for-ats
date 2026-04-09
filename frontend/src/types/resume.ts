@@ -37,8 +37,3 @@ export interface ResumeData {
   ats_score?: number | null;
   matched_keywords?: string[];
 }
-
-export interface GenerateResponse {
-  resume: ResumeData;
-  rewritten_file_b64: string;
-}

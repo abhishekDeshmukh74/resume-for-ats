@@ -1,5 +1,3 @@
-import type { GenerateResponse } from '../types/resume';
-
 const BASE = '/api';
 
 async function handleResponse<T>(res: Response): Promise<T> {
@@ -39,20 +37,6 @@ export async function scrapeJd(url: string): Promise<{ text: string }> {
   return handleResponse<{ text: string }>(res);
 }
 
-export async function generateResume(
-  resume_text: string,
-  jd_text: string,
-  resume_file_b64: string,
-  resume_file_type: string,
-): Promise<GenerateResponse> {
-  const res = await fetch(`${BASE}/generate-resume`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ resume_text, jd_text, resume_file_b64, resume_file_type }),
-  });
-  return handleResponse<GenerateResponse>(res);
-}
-
 // ── Preview / Confirm (two-phase) ───────────────────────────────────────
 
 export interface TextReplacement {
@@ -66,18 +50,6 @@ export interface PreviewResponse {
   ats_score: number;
   matched_keywords: string[];
   still_missing_keywords: string[];
-}
-
-export async function previewResume(
-  resume_text: string,
-  jd_text: string,
-): Promise<PreviewResponse> {
-  const res = await fetch(`${BASE}/preview`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ resume_text, jd_text }),
-  });
-  return handleResponse<PreviewResponse>(res);
 }
 
 export async function confirmResume(
